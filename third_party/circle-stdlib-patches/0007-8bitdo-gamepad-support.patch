@@ -23,7 +23,7 @@ new file mode 100644
 index 00000000..ca04d1b2
 --- /dev/null
 +++ b/libs/circle/include/circle/usb/usbgamepad8bitdo.h
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,40 @@
 +//
 +// usbgamepad8bitdo.h
 +//
@@ -52,6 +52,15 @@ index 00000000..ca04d1b2
 +
 +private:
 +	unsigned m_nLoggedReports;
++};
++
++class CUSBGamePad8BitDoUltimateCDevice : public CUSBGamePadXbox360Device
++{
++public:
++	CUSBGamePad8BitDoUltimateCDevice (CUSBFunction *pFunction);
++	~CUSBGamePad8BitDoUltimateCDevice (void);
++
++	boolean Configure (void);
 +};
 +
 +#endif
@@ -229,13 +238,17 @@ index 75210581..d8d0a384 100644
  	    || pName->Compare ("int9-0-2") == 0)
  	{
  		pResult = new CUSBStandardHub (pParent);
-@@ -130,7 +140,8 @@ CUSBFunction *CUSBDeviceFactory::GetDevice (CUSBFunction *pParent, CString *pNam
+@@ -130,7 +140,11 @@ CUSBFunction *CUSBDeviceFactory::GetDevice (CUSBFunction *pParent, CString *pNam
  		pResult = new CUSBGamePadPS4Device (pParent);
  	}
- 	else if (   pName->Compare ("ven45e-28e") == 0
+-	else if (   pName->Compare ("ven45e-28e") == 0
 -		 || pName->Compare ("ven45e-28f") == 0)
-+		 || pName->Compare ("ven45e-28f") == 0
-+		 || pName->Compare ("ven2dc8-3106") == 0) // 8BitDo Ultimate C 2.4G
++	else if (pName->Compare ("ven2dc8-3106") == 0) // 8BitDo Ultimate C 2.4G
++	{
++		pResult = new CUSBGamePad8BitDoUltimateCDevice (pParent);
++	}
++	else if (   pName->Compare ("ven45e-28e") == 0
++		 || pName->Compare ("ven45e-28f") == 0)
  	{
  		pResult = new CUSBGamePadXbox360Device (pParent);
  	}
@@ -244,7 +257,7 @@ new file mode 100644
 index 00000000..7e60a948
 --- /dev/null
 +++ b/libs/circle/lib/usb/usbgamepad8bitdo.cpp
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,120 @@
 +//
 +// usbgamepad8bitdo.cpp
 +//
@@ -266,6 +279,20 @@ index 00000000..7e60a948
 +
 +CUSBGamePad8BitDoDevice::~CUSBGamePad8BitDoDevice (void)
 +{
++}
++
++CUSBGamePad8BitDoUltimateCDevice::CUSBGamePad8BitDoUltimateCDevice (CUSBFunction *pFunction)
++: CUSBGamePadXbox360Device (pFunction)
++{
++}
++
++CUSBGamePad8BitDoUltimateCDevice::~CUSBGamePad8BitDoUltimateCDevice (void)
++{
++}
++
++boolean CUSBGamePad8BitDoUltimateCDevice::Configure (void)
++{
++	return ConfigureGamePad (TRUE, 32);
 +}
 +
 +boolean CUSBGamePad8BitDoDevice::Configure (void)
@@ -424,9 +451,10 @@ index 7ca87b11..749d16c3 100644
  	{
 +		CLogger::Get ()->Write (FromUSBHID, LogError,
 +					"HID interface %u has no interrupt input endpoint", GetInterfaceNumber ());
- 		ConfigurationError (FromUSBHID);
- 
- 		return FALSE;
+		ConfigurationError (FromUSBHID);
+
+		return FALSE;
+	}
 diff --git a/libs/circle/lib/usb/usbstandardhub.cpp b/libs/circle/lib/usb/usbstandardhub.cpp
 index c8a080be..32623589 100644
 --- a/libs/circle/lib/usb/usbstandardhub.cpp
