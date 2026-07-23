@@ -58,9 +58,7 @@ int mousedrv_get_y(void) { return mouse_y; }
 unsigned long mousedrv_get_timestamp(void) { return mouse_timestamp; }
 
 void emu_mouse_move(int x, int y) {
-  mouse_x += x;
-  mouse_y -= y;
-  mouse_timestamp = vsyncarch_gettime();
+  mouse_move((float)x, (float)y);
 }
 
 void emu_mouse_button_left(int pressed) {
