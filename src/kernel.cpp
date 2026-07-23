@@ -345,8 +345,25 @@ long func_to_keycode(int btn_func) {
 
 }
 
+class CKernel::USBPlugAndPlayTask : public CTask {
+public:
+  explicit USBPlugAndPlayTask(CKernel *kernel) : mKernel(kernel) {
+    SetName("usbpnp");
+  }
+
+  void Run(void) override {
+    for (;;) {
+      mKernel->UpdateUSBPlugAndPlay();
+      CScheduler::Get()->MsSleep(100);
+    }
+  }
+
+private:
+  CKernel *mKernel;
+};
+
 CKernel::CKernel(void)
-    : ViceStdioApp("vice"), mViceSound(nullptr),
+    : ViceStdioApp("vice"), mViceSound(nullptr), mUSBPlugAndPlayTask(nullptr),
       mNumJoy(emu_get_num_joysticks()),
       mVolume(100), mNumCoresComplete(0),
       mNeedSoundInit(false), mNumSoundChannels(1) {
@@ -781,6 +798,14 @@ void CKernel::SetupUSBGamepads() {
   emu_set_gamepad_info(num_pads, num_buttons, num_axes, num_hats);
 }
 
+void CKernel::UpdateUSBPlugAndPlay() {
+  if (mUSBHCII.UpdatePlugAndPlay()) {
+    SetupUSBKeyboard();
+    SetupUSBMouse();
+    SetupUSBGamepads();
+  }
+}
+
 ViceApp::TShutdownMode CKernel::Run(void) {
   printf("boot: kernel run enter\r\n");
 
@@ -800,6 +825,7 @@ ViceApp::TShutdownMode CKernel::Run(void) {
   printf("boot: demo mode set\r\n");
 
 #ifndef BMC64_USE_EMU_MULTICORE
+  mUSBPlugAndPlayTask = new USBPlugAndPlayTask(this);
   printf("boot: launching emulator on core 0\r\n");
   mEmulatorCore->LaunchEmulator(mTimingOption);
   printf("boot: emulator returned\r\n");
@@ -809,12 +835,7 @@ ViceApp::TShutdownMode CKernel::Run(void) {
   printf("Core 0 idle\n");
 
   while(1) {
-    boolean bUpdated = mUSBHCII.UpdatePlugAndPlay();
-    if (bUpdated) {
-        SetupUSBKeyboard();
-        SetupUSBMouse();
-        SetupUSBGamepads();
-    }
+    UpdateUSBPlugAndPlay();
 #if AARCH == 64
     asm("dsb sy\n\twfi");
 #else
