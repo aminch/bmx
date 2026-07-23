@@ -300,7 +300,7 @@ private:
 class ViceStdioApp : public ViceScreenApp {
 public:
   ViceStdioApp(const char *kernel)
-      : ViceScreenApp(kernel), mUSBHCII(&mInterrupt, &mTimer),
+      : ViceScreenApp(kernel), mUSBHCII(&mInterrupt, &mTimer, TRUE),
         mEMMC(&mInterrupt, &mTimer, &mActLED)
         {}
 
