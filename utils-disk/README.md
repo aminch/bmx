@@ -11,3 +11,7 @@ tree:
 
 Only regular, non-hidden files are copied into the generated disk image.
 Generated `utils.d64` files are staging artifacts and are not stored in git.
+
+The machine-specific image is the initial selection under
+`Drives > Default disk`. The menu can select another disk image, choose drive
+8 through 11, or disable automatic insertion with `None`.

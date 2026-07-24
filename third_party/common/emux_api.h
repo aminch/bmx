@@ -40,11 +40,18 @@ typedef enum {
   BMC64_MACHINE_CLASS_UNKNOWN,
   BMC64_MACHINE_CLASS_VIC20,
   BMC64_MACHINE_CLASS_C64,
+  BMC64_MACHINE_CLASS_SCPU64,
   BMC64_MACHINE_CLASS_C128,
   BMC64_MACHINE_CLASS_PLUS4,
   BMC64_MACHINE_CLASS_PLUS4EMU,
   BMC64_MACHINE_CLASS_PET,
 } BMC64MachineClass;
+
+typedef enum {
+  BMC64_C64_CORE_X64,
+  BMC64_C64_CORE_X64SC,
+  BMC64_C64_CORE_UNKNOWN,
+} BMC64C64Core;
 
 typedef enum {
   BMX_RS232_MODE_RAW_TCP = 0,
@@ -253,6 +260,7 @@ typedef struct vkbd_key* vkbd_key_array;
 
 // NOTE: For Plus4 vic == ted
 extern int emux_machine_class;
+extern BMC64C64Core emux_c64_core;
 extern int vic_showing;
 extern int vdc_showing;
 extern int vic_enabled;
@@ -275,6 +283,25 @@ int emux_apply_rs232net(int enabled, int mode, int interface,
                         int hayes_audio, const char *phonebook);
 void emux_set_rs232_hayes_audio(int hayes_audio);
 
+// Update access is deliberately synchronous and explicit. The menu must call
+// these functions only after the user activates System > Update... . Merely
+// building, opening or navigating the menu must never start network activity.
+int emux_network_is_ready(void);
+// Returns 1 for an explicitly compiled debug test channel, 0 for the
+// production kdre/bmx channel, and -1 if the fixed label cannot be copied.
+// This is a local build-identity query and never performs network I/O.
+int emux_update_channel_info(char *label, unsigned label_size);
+int emux_update_progress_begin_explicit(void);
+void emux_update_progress_end_explicit(void);
+int emux_update_check_explicit(char *message, unsigned message_size);
+int emux_update_draft_test_available(void);
+int emux_update_draft_begin_explicit(char *message, unsigned message_size);
+int emux_update_draft_complete_explicit(char *message,
+                                        unsigned message_size);
+void emux_update_cancel_explicit(void);
+int emux_update_install_explicit(int destructive_reset_consent,
+                                 char *message, unsigned message_size);
+
 // Press/release key by row/col in keyboard matrix.
 void emux_kbd_set_latch_keyarr(int row, int col, int value);
 
@@ -291,6 +318,9 @@ int emux_attach_tape_image(char *filename);
 
 // Detach a tape image.
 void emux_detach_tape(void);
+
+// Prepare emulator-owned storage for board reboot or power-off.
+int emux_prepare_shutdown(void);
 
 // Attach a cart image
 // Return negative on error.

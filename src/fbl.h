@@ -118,7 +118,7 @@ public:
 
   // initializes the bcm_host interface
   static void Initialize();
-  static void OGLInit();
+  static bool OGLInit();
 
   bool UsesShader();
 
@@ -146,20 +146,21 @@ public:
 			bool sharper,
 			bool bilinear_interpolation);
 
-  // make off screen resources for fb1 (and optionally fb2) visible
-  // then swap destination resources in prep for next frame
-  static void SwapResources(bool sync, FrameBufferLayer* fb1, FrameBufferLayer* fb2);
+  // Make offscreen resources for all ready layers visible.
+  static void PresentLayers(bool sync, FrameBufferLayer *layers, uint32_t ready_mask);
+  static void PresentLayer(bool sync, FrameBufferLayer *layer);
 
   static void SetInterpolation(int enable);
 
 private:
+  static void PresentLayerList(bool sync, FrameBufferLayer **layers, unsigned count);
   void FreeInternal(bool keepPixels);
 #if RASPPI != 5
   void Swap(DISPMANX_UPDATE_HANDLE_T& dispman_update);
   void SwapGL(bool sync);
   void RenderGL();
 
-  void ShaderInit();
+  bool ShaderInit();
   void ShaderDestroy();
   void CreateTexture();
   void ReCreateTexture();

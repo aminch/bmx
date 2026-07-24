@@ -17,6 +17,7 @@
 #define _vice_sound_h
 
 #include "defs.h"
+#include "sound_output_priority.h"
 #include "sound_types.h"
 #include <circle/interrupt.h>
 #include <circle/spinlock.h>
@@ -39,7 +40,9 @@ public:
 
   ~ViceSound(void);
 
-  boolean Playback(int volume, int channels);
+  static SoundOutputPriority DefaultOutputPriority(void);
+
+  boolean Playback(int volume, int channels, SoundOutputPriority priority);
   boolean PlaybackActive(void) const;
   void CancelPlayback(void);
   void SetControl(int nVolume,
@@ -49,6 +52,8 @@ public:
 
 private:
   CSoundBaseDevice *mSoundDevice;
+  boolean StartHDMI(void);
+  boolean StartUSB(void);
   CInterruptSystem *mInterrupt;
   TVCHIQSoundDestination mDestination;
   unsigned mQueueSizeFrames;

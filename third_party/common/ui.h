@@ -37,6 +37,21 @@
 #define MAX_STR_VAL_LEN 256 // should match max fn from ffconf.h
 #define MAX_DSP_VAL_LEN 32  // should be below display width
 
+// Scrollable dialogs use a 30-column box with one column of left inset.
+// The maximum text matches the bounded Update menu result buffer without
+// requiring a second large stack copy in the UI.
+#define UI_WRAPPED_DIALOG_LINE_COLUMNS 29U
+#define UI_WRAPPED_DIALOG_MAX_TEXT 2047U
+// Covers the maximum signed configuration warning while bounding the heap
+// even if a future caller supplies a newline-heavy message.
+#define UI_WRAPPED_DIALOG_MAX_LINES 72U
+
+// Foreground update callbacks can arrive for every small network, hash or
+// copy chunk.  Input is still pumped for every callback, while framebuffer
+// presentation is coalesced to avoid making update speed depend on the video
+// refresh rate.  Circle clock ticks are microseconds.
+#define UI_UPDATE_PROGRESS_RENDER_INTERVAL_TICKS UINT32_C(200000)
+
 // Special menu id for items that do nothing or have no action callback
 #define MENU_ID_DO_NOTHING -1
 
@@ -127,6 +142,8 @@ struct menu_item {
   int menu_top;
 
   void (*cursor_listener_func)(struct menu_item* parent, int);
+  int (*left_right_listener_func)(struct menu_item* parent,
+                                  struct menu_item* current, int right);
 
   // For menu roots only, called on menu being popped off the stack (old_root)
   // By the time this is called, the popped root has already been cleared of
@@ -214,7 +231,13 @@ void ui_make_transparent(void);
 void ui_render_now(int menu_stack_index);
 void ui_error(const char *format, ...);
 void ui_info(const char *format, ...);
-void ui_confirm_wrapped(char *title, const char *txt, int ok_value, int ok_id);
+void ui_error_wrapped(const char *txt);
+void ui_info_wrapped(const char *txt);
+struct menu_item *ui_confirm_wrapped(char *title, const char *txt,
+                                     int ok_value, int ok_id);
+struct menu_item *ui_confirm_wrapped_cancel_default(char *title,
+                                                    const char *txt,
+                                                    int ok_value, int ok_id);
 
 struct video_canvas_s *ui_get_active_canvas(void);
 
@@ -255,6 +278,19 @@ extern int ui_showing;
 
 void ui_handle_toggle_or_quick_func(void);
 void ui_render_single_frame(void);
+
+// Fixed, value-free foreground updater overlay.  These functions are inert
+// until the explicit System > Update action calls begin.  phase is 0..5
+// (Discovery, Manifest, ZIP, Hash, Stage, Reboot); progress is 0..1000.
+// present() only updates the pending snapshot.  pump() always polls input and
+// cancellation, but coalesces synchronous framebuffer presentations.
+int ui_update_progress_begin(void);
+void ui_update_progress_present(unsigned phase, unsigned progress_per_mille,
+                                int determinate, int cancel_enabled,
+                                int cancel_pending);
+int ui_update_progress_pump(void);
+void ui_update_progress_end(void);
+
 void ui_geometry_changed(int dpx, int dpy,
                          int fbw, int fbh,
                          int sw, int sh,

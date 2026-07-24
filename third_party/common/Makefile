@@ -7,11 +7,19 @@ OBJ = demo.o emux_api.o font.o joy.o kbd.o keycodes.o menu.o menu_confirm_osd.o 
 INCLUDES = -I $(CIRCLE_STDLIB_INSTALL_DIR)/include \
 	   -I $(CIRCLE_STDLIB_HOME)/include \
 	   -I $(CIRCLE_STDLIB_HOME)/libs/circle/addon \
-	   -I $(CIRCLE_STDLIB_HOME)/libs/circle/addon/fatfs
+	   -I $(CIRCLE_STDLIB_HOME)/libs/circle/addon/fatfs \
+	   -I ../vice-3.10/src
 
 ifeq ($(BMC64_BUILD_PROFILE),debug)
 CFLAGS_FOR_TARGET += -DBMC64_DEBUG_PROFILE
 CPPFLAGS_FOR_TARGET += -DBMC64_DEBUG_PROFILE
+else
+CFLAGS_FOR_TARGET += -DNDEBUG
+CPPFLAGS_FOR_TARGET += -DNDEBUG
+endif
+ifneq ($(BMC64_MENU_LOG_LEVEL),)
+CFLAGS_FOR_TARGET += -DBMC64_MENU_LOG_LEVEL=$(BMC64_MENU_LOG_LEVEL)
+CPPFLAGS_FOR_TARGET += -DBMC64_MENU_LOG_LEVEL=$(BMC64_MENU_LOG_LEVEL)
 endif
 
 all: libbmc64common.a

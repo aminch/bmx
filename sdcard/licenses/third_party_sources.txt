@@ -73,8 +73,9 @@ the modem core to VICE RS232/ACIA/Userport I/O and Circle sockets.
 
 The Pi4/Pi5 staging scripts build `utils/c64/utils.d64` from
 `utils-disk/c64/` using `c1541`. The generated disk image is staged onto the
-boot partition and attached as drive 9 by default when running the C64
-emulator. The generated `utils.d64` is not stored in git.
+boot partition. It is initially selected for drive 8, and can be changed or
+disabled under `Drives > Default disk`. The generated `utils.d64` is not
+stored in git.
 
 ## Circle and circle-stdlib
 

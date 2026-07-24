@@ -5,6 +5,7 @@ namespace bmc64 {
 
 enum class MachineId {
   C64,
+  SCPU64,
   C128,
   VIC20,
   PLUS4,

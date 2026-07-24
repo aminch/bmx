@@ -23,6 +23,21 @@ constexpr MachineDescriptor kC64 = {
     nullptr,
 };
 
+constexpr MachineDescriptor kScpu64 = {
+    MachineId::SCPU64,
+    "SCPU64",
+    "/SCPU64",
+    "/disks/SCPU64",
+    "/SCPU64/bootstat.txt",
+    ".scpu64",
+    "/SCPU64/rpi_pos_de.vkm",
+    {1025700, 1026611, 982800, 984404, 982800},
+    false,
+    false,
+    "+VICIIvcache",
+    nullptr,
+};
+
 constexpr MachineDescriptor kC128 = {
     MachineId::C128,
     "C128",
@@ -86,8 +101,10 @@ constexpr MachineDescriptor kPet = {
 }  // namespace
 
 const MachineDescriptor &CurrentMachine() {
-#if defined(RASPI_C64)
+#if defined(RASPI_C64) || defined(RASPI_C64SC)
   return kC64;
+#elif defined(RASPI_SCPU64)
+  return kScpu64;
 #elif defined(RASPI_C128)
   return kC128;
 #elif defined(RASPI_VIC20)

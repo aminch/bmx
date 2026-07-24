@@ -52,11 +52,40 @@
 #include "raspi_util.h"
 #include "ui.h"
 
-extern void reboot(void);
+#include "charset.h"
+#include "imagecontents.h"
+#include "imagecontents/diskcontents.h"
+#include "imagecontents/tapecontents.h"
+#include "lib.h"
 
-#define VERSION_STRING "2026.07.03"
+extern void reboot(void);
+extern void poweroff(void);
 
 #define VARIANT_STRING ""
+
+#define BMC64_DIRENT_FAT_ATTR_VALID 0x0100
+#define FAT_ATTR_DIRECTORY 0x10
+
+#define BMC64_LOG_OFF   0
+#define BMC64_LOG_EVENT 1
+#define BMC64_LOG_DEBUG 2
+#define BMC64_LOG_TRACE 3
+
+#ifdef BMC64_DEBUG_PROFILE
+#ifndef BMC64_MENU_LOG_LEVEL
+#define BMC64_MENU_LOG_LEVEL BMC64_LOG_OFF
+#endif
+#else
+#undef BMC64_MENU_LOG_LEVEL
+#define BMC64_MENU_LOG_LEVEL BMC64_LOG_OFF
+#endif
+
+#if BMC64_MENU_LOG_LEVEL >= BMC64_LOG_DEBUG
+#define BMC64_MENU_DEBUG(_fmt, ...) \
+    printf("menudbg: " _fmt "\r\n", ##__VA_ARGS__)
+#else
+#define BMC64_MENU_DEBUG(_fmt, ...)
+#endif
 
 #define DEFAULT_VICII_H_STRETCH 1200
 #define DEFAULT_VICII_V_STRETCH 1000
@@ -67,17 +96,53 @@ extern void reboot(void);
 #define DEFAULT_VDC_H_STRETCH 1450
 #define DEFAULT_VDC_V_STRETCH 1000
 
-#define SWITCH_MSG "NOTE: For machines other than C64, " \
-                   "the SDCard will only boot on the same Pi model the " \
-                   "switch occurred from. To boot on a different Pi model, " \
-                   "switch back to C64 first."
-
 #define SWITCH_FAIL_MSG "Something went wrong. File a bug with the error " \
                         "code above. You may have to manually edit " \
                         "config.txt and/or cmdline.txt to restore boot."
 
+#define MACHINE_SWITCH_MSG \
+    "Apply %s and reboot? BMX will update config.txt and " \
+    "cmdline.txt."
+
+#define MACHINE_NETWORK_SWITCH_MSG \
+    "Apply %s, save pending network changes and reboot? " \
+    "BMX will update config.txt and cmdline.txt."
+
 #define NETWORK_REBOOT_MSG "Network changes require reboot.\n" \
                            "Save and reboot now?"
+
+typedef enum {
+  MACHINE_EMULATOR_X64,
+  MACHINE_EMULATOR_X64SC,
+  MACHINE_EMULATOR_XSCPU64,
+  MACHINE_EMULATOR_X128,
+  MACHINE_EMULATOR_XVIC,
+  MACHINE_EMULATOR_XPLUS4,
+  MACHINE_EMULATOR_XPLUS4EMU,
+  MACHINE_EMULATOR_XPET,
+  MACHINE_EMULATOR_UNKNOWN,
+} MachineEmulator;
+
+typedef enum {
+  SYSTEM_ACTION_REBOOT,
+  SYSTEM_ACTION_POWER_OFF,
+} SystemAction;
+
+static struct bmx_machine_config *machine_config;
+static const struct bmx_machine_mode *machine_active_mode;
+static char machine_preferred_mode_id[BMX_MODE_ID_LEN];
+static MachineEmulator machine_active_emulator = MACHINE_EMULATOR_UNKNOWN;
+static struct menu_item *machine_emulator_item;
+static struct menu_item *machine_standard_item;
+static struct menu_item *machine_output_item;
+static struct menu_item *machine_mode_item;
+
+static int machine_change_pending(void);
+static const struct bmx_machine *machine_selected_machine(void);
+static const struct bmx_machine_mode *machine_selected_mode(void);
+static BMC64C64Core machine_selected_c64_core(void);
+static void machine_target_description(char *message, size_t message_size);
+static void machine_selection_changed(struct menu_item *item);
 
 // For filename filters
 typedef enum {
@@ -108,6 +173,11 @@ long key_bindings[6];
 
 char attached_disk_name[4][MAX_STR_VAL_LEN];
 
+static struct menu_item *default_disk_image_item;
+static struct menu_item *default_disk_drive_item;
+static char default_disk_image[MAX_STR_VAL_LEN];
+static int default_disk_drive = 8;
+
 // Lower byte is BTN_ASSIGN_ constant. Upper byte is port or other arg.
 unsigned int gpio_bindings[NUM_GPIO_PINS];
 
@@ -122,7 +192,9 @@ struct menu_item *hotkey_tf3_item;
 struct menu_item *hotkey_tf5_item;
 struct menu_item *hotkey_tf7_item;
 struct menu_item *volume_item;
+struct menu_item *sound_output_priority_item;
 struct menu_item *statusbar_item;
+struct menu_item *diagnostics_overlay_item;
 struct menu_item *statusbar_padding_item;
 struct menu_item *tape_reset_with_machine_item;
 struct menu_item *vkbd_transparency_item;
@@ -283,6 +355,26 @@ TEST_FILTER_MACRO(test_snap_name, num_snap_ext, snap_filt_ext);
 TEST_FILTER_MACRO(test_prg_name, num_prg_ext, prg_filt_ext);
 TEST_FILTER_MACRO(test_phonebook_name, num_phonebook_ext, phonebook_filt_ext);
 
+static int filter_matches_file(FileFilter filter, char *name) {
+  if (filter == FILTER_DISK) {
+    return test_disk_name(name);
+  } else if (filter == FILTER_TAPE) {
+    return test_tape_name(name);
+  } else if (filter == FILTER_CART) {
+    return test_cart_name(name);
+  } else if (filter == FILTER_SNAP) {
+    return test_snap_name(name);
+  } else if (filter == FILTER_PRGS) {
+    return test_prg_name(name);
+  } else if (filter == FILTER_PHONEBOOK) {
+    return test_phonebook_name(name);
+  } else if (filter == FILTER_NONE) {
+    return 1;
+  }
+
+  return 0;
+}
+
 static void rtrim(char *txt) {
   if (!txt) return;
   int p=strlen(txt)-1;
@@ -366,12 +458,26 @@ static void remove_dir(char *path) {
   }
 }
 
-static int dirent_is_dir(DirType dir_type, struct dirent *entry) {
+typedef enum {
+  DIRENT_TYPE_SOURCE_STAT = 0,
+  DIRENT_TYPE_SOURCE_D_TYPE,
+  DIRENT_TYPE_SOURCE_FAT_ATTR,
+} DirentTypeSource;
+
+static int dirent_is_dir(DirType dir_type, struct dirent *entry,
+                         DirentTypeSource *source) {
+  *source = DIRENT_TYPE_SOURCE_STAT;
 #if defined(_DIRENT_HAVE_D_TYPE) && defined(DT_DIR) && defined(DT_UNKNOWN)
   if (entry->d_type != DT_UNKNOWN) {
+    *source = DIRENT_TYPE_SOURCE_D_TYPE;
     return (entry->d_type & DT_DIR) != 0;
   }
 #endif
+  unsigned int fat_attr = (unsigned int)entry->d_ino;
+  if ((fat_attr & BMC64_DIRENT_FAT_ATTR_VALID) != 0) {
+    *source = DIRENT_TYPE_SOURCE_FAT_ATTR;
+    return (fat_attr & FAT_ATTR_DIRECTORY) != 0;
+  }
 
   struct stat st;
   return stat(fullpath(dir_type, entry->d_name), &st) == 0 && S_ISDIR(st.st_mode);
@@ -385,6 +491,14 @@ static void list_files(struct menu_item *parent,
   struct dirent *ep;
   int i;
   int include;
+  unsigned int entries_seen = 0;
+  unsigned int dirs_seen = 0;
+  unsigned int non_dirs_seen = 0;
+  unsigned int file_matches = 0;
+  unsigned int d_type_checks = 0;
+  unsigned int fat_attr_checks = 0;
+  unsigned int stat_checks = 0;
+  char listed_path[256];
 
   dp = opendir(fullpath(dir_type,""));
   if (dp == NULL &&
@@ -405,6 +519,7 @@ static void list_files(struct menu_item *parent,
       }
     }
   }
+  snprintf(listed_path, sizeof listed_path, "%s", fullpath(dir_type, ""));
 
   // Current directory item, also action to change disk drive
   struct menu_item* cur_dir = ui_menu_add_button(
@@ -449,30 +564,19 @@ static void list_files(struct menu_item *parent,
       if (strcmp(ep->d_name, ".") == 0 || strcmp(ep->d_name, "..") == 0) {
         continue;
       }
-      if (dirent_is_dir(dir_type, ep)) {
+      ++entries_seen;
+
+      DirentTypeSource type_source;
+      if (dirent_is_dir(dir_type, ep, &type_source)) {
+        ++dirs_seen;
         ui_menu_add_button_with_value(menu_id, &dirs_root, ep->d_name, 0,
                                       ep->d_name, "(dir)")
             ->sub_id = MENU_SUB_ENTER_DIR;
       } else {
-        include = 0;
-        if (filter == FILTER_DISK) {
-          include = test_disk_name(ep->d_name);
-        } else if (filter == FILTER_TAPE) {
-          include = test_tape_name(ep->d_name);
-        } else if (filter == FILTER_CART) {
-          include = test_cart_name(ep->d_name);
-        } else if (filter == FILTER_SNAP) {
-          include = test_snap_name(ep->d_name);
-        } else if (filter == FILTER_PRGS) {
-          include = test_prg_name(ep->d_name);
-        } else if (filter == FILTER_PHONEBOOK) {
-          include = test_phonebook_name(ep->d_name);
-        } else if (filter == FILTER_DIRS) {
-          include = 0;
-        } else if (filter == FILTER_NONE) {
-          include = 1;
-        }
+        ++non_dirs_seen;
+        include = filter_matches_file(filter, ep->d_name);
         if (include) {
+          ++file_matches;
           // Button name will be filename but it will be truncated
           // due to menu width.  Actual filename will be stored in
           // str_value which is never displayed except for text fields.
@@ -482,10 +586,23 @@ static void list_files(struct menu_item *parent,
           strncpy(new_button->str_value, ep->d_name, MAX_STR_VAL_LEN - 1);
         }
       }
+
+      if (type_source == DIRENT_TYPE_SOURCE_D_TYPE) {
+        ++d_type_checks;
+      } else if (type_source == DIRENT_TYPE_SOURCE_FAT_ATTR) {
+        ++fat_attr_checks;
+      } else {
+        ++stat_checks;
+      }
     }
 
     (void)closedir(dp);
   }
+
+  BMC64_MENU_DEBUG("filelist path='%s' filter=%d entries=%u dirs=%u "
+                   "non_dirs=%u matches=%u dtype=%u fatattr=%u stat=%u",
+                   listed_path, filter, entries_seen, dirs_seen, non_dirs_seen,
+                   file_matches, d_type_checks, fat_attr_checks, stat_checks);
 
   struct menu_item *dfc = dirs_root.first_child;
   merge_sort(&dfc);
@@ -510,6 +627,93 @@ static void files_cursor_listener(struct menu_item* parent,
   current_dir_pos[parent->value] = new_pos;
 }
 
+static int files_left_right_listener(struct menu_item* parent,
+                                     struct menu_item* current, int right);
+
+static void add_image_content_line(struct menu_item *root, const char *line) {
+  char display[MAX_MENU_STR];
+  snprintf(display, sizeof display, "%s", line ? line : "");
+  ui_menu_add_button(MENU_ID_DO_NOTHING, root, display);
+}
+
+static image_contents_t *read_supported_image_contents(const char *path) {
+  image_contents_t *contents = diskcontents_filesystem_read(path);
+  if (contents == NULL) {
+    contents = tapecontents_read(path);
+  }
+  return contents;
+}
+
+static void show_image_contents(DirType dir_type, const char *name) {
+  char path[256];
+  char title[MAX_MENU_STR];
+  char *tmp;
+  int blocks;
+  image_contents_t *contents;
+  image_contents_file_list_t *entry;
+  struct menu_item *root;
+
+  snprintf(path, sizeof path, "%s", fullpath(dir_type, (char *)name));
+
+  root = ui_push_menu(-1, -1);
+  if (root == NULL) {
+    printf("ERROR: cannot show image contents, menu stack is full\n");
+    return;
+  }
+
+  root->sub_id = MENU_SUB_IMAGE_CONTENTS;
+  root->left_right_listener_func = files_left_right_listener;
+
+  snprintf(title, sizeof title, "Contents: %s", name);
+  add_image_content_line(root, title);
+  ui_menu_add_divider(root);
+
+  contents = read_supported_image_contents(path);
+  if (contents == NULL) {
+    add_image_content_line(root, "(Cannot read image contents)");
+    return;
+  }
+
+  tmp = image_contents_to_string(contents, IMAGE_CONTENTS_STRING_ASCII);
+  add_image_content_line(root, tmp);
+  lib_free(tmp);
+
+  for (entry = contents->file_list; entry != NULL; entry = entry->next) {
+    tmp = image_contents_file_to_string(entry, IMAGE_CONTENTS_STRING_ASCII);
+    add_image_content_line(root, tmp);
+    lib_free(tmp);
+  }
+
+  blocks = contents->blocks_free;
+  if (blocks >= 0) {
+    char blocks_free[MAX_MENU_STR];
+    snprintf(blocks_free, sizeof blocks_free, "%d BLOCKS FREE.", blocks);
+    add_image_content_line(root, blocks_free);
+  }
+
+  image_contents_destroy(contents);
+}
+
+static int files_left_right_listener(struct menu_item* parent,
+                                     struct menu_item* current, int right) {
+  if (parent->sub_id == MENU_SUB_IMAGE_CONTENTS) {
+    if (!right) {
+      ui_pop_menu();
+    }
+    return 1;
+  }
+
+  if (!right || current == NULL || current->disabled ||
+      current->type != BUTTON ||
+      current->sub_id != MENU_SUB_PICK_FILE ||
+      current->str_value[0] == '\0') {
+    return 0;
+  }
+
+  show_image_contents((DirType)parent->value, current->str_value);
+  return 1;
+}
+
 static void show_files(DirType dir_type, FileFilter filter, int menu_id,
                        int reset_cur_pos) {
   // Show files
@@ -523,6 +727,7 @@ static void show_files(DirType dir_type, FileFilter filter, int menu_id,
   file_root->value = dir_type;
 
   file_root->cursor_listener_func = files_cursor_listener;
+  file_root->left_right_listener_func = files_left_right_listener;
 
   if (menu_id == MENU_SAVE_SNAP_FILE ||
       (menu_id >= MENU_CREATE_D64_FILE && menu_id <= MENU_CREATE_TAP_FILE)) {
@@ -550,14 +755,22 @@ static void show_files(DirType dir_type, FileFilter filter, int menu_id,
 
 static void show_about() {
   struct menu_item *about_root = ui_push_menu(32, 8);
-  char title[16];
+  char title[96];
+  char version[65];
   char desc[32];
 
-  snprintf (title, 15, "%s%s %s", "BMX", VARIANT_STRING, VERSION_STRING);
+  if (circle_get_bmx_version(version, sizeof(version)) != 0) {
+    strncpy(version, "unknown", sizeof(version) - 1);
+    version[sizeof(version) - 1] = '\0';
+  }
+  snprintf(title, sizeof(title), "%s%s %s", "BMX", VARIANT_STRING, version);
 
   switch (emux_machine_class) {
   case BMC64_MACHINE_CLASS_C64:
     strncpy (desc, "A Bare Metal C64 Emulator", 31);
+    break;
+  case BMC64_MACHINE_CLASS_SCPU64:
+    strncpy (desc, "A Bare Metal SCPU64 Emulator", 31);
     break;
   case BMC64_MACHINE_CLASS_C128:
     strncpy (desc, "A Bare Metal C128 Emulator", 31);
@@ -834,32 +1047,17 @@ static struct network_menu_state network_saved_state = {
   2400, 0, BMX_HAYES_AUDIO_OFF
 };
 static int network_scan_requires_reboot;
-static int network_reboot_confirm_open;
+static int pending_reboot_confirm_open;
 
 static int save_network_cmdline(void);
+static int append_network_boot_options(struct bmx_boot_plan *plan);
+static int apply_rs232net_config(int strict);
 
-static int network_key(const char *key) {
-  return strcmp(key, "network") == 0 ||
-         strcmp(key, "network_dhcp") == 0 ||
-         strcmp(key, "network_ip") == 0 ||
-         strcmp(key, "network_netmask") == 0 ||
-         strcmp(key, "network_gateway") == 0 ||
-         strcmp(key, "network_dns") == 0 ||
-         strcmp(key, "network_ssid") == 0 ||
-         strcmp(key, "network_psk") == 0 ||
-         strcmp(key, "network_country") == 0 ||
-         strcmp(key, "network_wait_ms") == 0 ||
-         strcmp(key, "network_test_host") == 0 ||
-         strcmp(key, "network_test_port") == 0 ||
-         strcmp(key, "rs232net") == 0 ||
-         strcmp(key, "rs232net_mode") == 0 ||
-         strcmp(key, "rs232net_interface") == 0 ||
-         strcmp(key, "rs232net_target") == 0 ||
-         strcmp(key, "rs232net_phonebook") == 0 ||
-         strcmp(key, "rs232net_baud") == 0 ||
-         strcmp(key, "rs232net_ip232") == 0 ||
-         strcmp(key, "rs232net_hayes_audio") == 0 ||
-         strcmp(key, "rs232net_ascii_case") == 0;
+static void pending_reboot_confirm_popped(struct menu_item *new_root,
+                                          struct menu_item *old_root) {
+  (void)new_root;
+  (void)old_root;
+  pending_reboot_confirm_open = 0;
 }
 
 static int rs232net_valid_baud(int baud) {
@@ -1022,11 +1220,13 @@ static void load_network_cmdline(void) {
           network_state.rs232net_interface = BMX_RS232_INTERFACE_USERPORT;
         }
       } else if (strcmp(key, "rs232net_target") == 0) {
+        decode_network_value(value);
         strncpy(network_state.rs232net_target, value,
                 sizeof network_state.rs232net_target - 1);
         network_state.rs232net_target[
             sizeof network_state.rs232net_target - 1] = '\0';
       } else if (strcmp(key, "rs232net_phonebook") == 0) {
+        decode_network_value(value);
         strncpy(network_state.rs232net_phonebook, value,
                 sizeof network_state.rs232net_phonebook - 1);
         network_state.rs232net_phonebook[
@@ -1059,17 +1259,12 @@ static void load_network_cmdline(void) {
       network_state.rs232net_baud, network_state.rs232net_interface);
 }
 
-static void append_network_option(char *line, const char *key,
-                                  const char *value) {
+static int append_network_option(struct bmx_boot_plan *plan, const char *key,
+                                 const char *value) {
   if (value == NULL || value[0] == '\0') {
-    return;
+    return 0;
   }
-  if (strlen(line) > 0) {
-    strcat(line, " ");
-  }
-  strcat(line, key);
-  strcat(line, "=");
-  strcat(line, value);
+  return bmx_boot_plan_set_cmdline_option(plan, key, value);
 }
 
 static const char *rs232net_interface_key(int interface) {
@@ -1139,14 +1334,15 @@ static void decode_network_value(char *value) {
   *dst = '\0';
 }
 
-static void append_network_option_encoded(char *line, const char *key,
-                                          const char *value) {
+static int append_network_option_encoded(struct bmx_boot_plan *plan,
+                                         const char *key,
+                                         const char *value) {
   char encoded[MAX_STR_VAL_LEN * 3];
   char *out = encoded;
   static const char hex[] = "0123456789ABCDEF";
 
   if (value == NULL || value[0] == '\0') {
-    return;
+    return 0;
   }
 
   for (const unsigned char *p = (const unsigned char *)value;
@@ -1160,19 +1356,7 @@ static void append_network_option_encoded(char *line, const char *key,
     }
   }
   *out = '\0';
-  append_network_option(line, key, encoded);
-}
-
-static int cmdline_content_line(const char *line) {
-  if (line == NULL) {
-    return 0;
-  }
-
-  while (*line == ' ' || *line == '\t' || *line == '\r' || *line == '\n') {
-    ++line;
-  }
-
-  return *line != '\0' && *line != '#';
+  return append_network_option(plan, key, encoded);
 }
 
 static int text_differs(const char *a, const char *b) {
@@ -1243,17 +1427,447 @@ static int validate_network_menu(void) {
   return 1;
 }
 
-static void save_network_and_reboot(void) {
-  if (!validate_network_menu()) {
+static void show_machine_switch_error(const struct bmx_machine *machine,
+                                      BMC64C64Core requested_core,
+                                      int status) {
+  if (status == BMC64_SWITCH_ERROR_SELECTOR_INVALID) {
+    ui_confirm_wrapped(
+        "Boot selector invalid",
+        "bmx-active-kernel.txt is missing, damaged, for another board, or "
+        "does not match this release. The machine selection was not changed. "
+        "Restore the file from the same BMX release ZIP.",
+        -1, -1);
+  } else if (status == BMC64_SWITCH_ERROR_KERNEL_MISSING) {
+    char kernel_name[VALUE_LEN];
+    char message[256];
+
+    if (machine == NULL ||
+        switch_machine_kernel_name(machine->machine_class, requested_core,
+                                   circle_get_model(), kernel_name,
+                                   sizeof kernel_name) != 0) {
+      strcpy(kernel_name, "Selected emulator image");
+    }
+    snprintf(message, sizeof message,
+             "%s is missing. config.txt was not changed. Rebuild or "
+             "restage the selected emulator before trying again.",
+             kernel_name);
+    ui_confirm_wrapped("Emulator unavailable", message, -1, -1);
+  } else {
+    char failcode[32];
+
+    sprintf(failcode, "FAILURE (CODE %d)", status);
+    ui_confirm_wrapped(failcode, SWITCH_FAIL_MSG, -1, -1);
+  }
+}
+
+static int apply_pending_system_changes(int force_network_save) {
+  int machine_pending = machine_change_pending();
+  int network_pending = network_menu_requires_reboot();
+  int apply_network = force_network_save || network_pending;
+  const struct bmx_machine *machine = machine_selected_machine();
+  const struct bmx_machine_mode *mode = machine_selected_mode();
+  BMC64C64Core c64_core = machine_selected_c64_core();
+  struct bmx_boot_plan plan;
+  int status;
+
+  if (!machine_pending && !apply_network) {
+    return 1;
+  }
+  if (apply_network && !validate_network_menu()) {
+    return 0;
+  }
+
+  bmx_boot_plan_init(&plan);
+
+  // Resolve and check the complete destination before writing either boot
+  // file. Network options are added to the same plan below.
+  if (machine_pending) {
+    status = switch_build_boot_plan(machine, mode, c64_core, &plan);
+    if (status != 0) {
+      show_machine_switch_error(machine, c64_core, status);
+      return 0;
+    }
+  }
+
+  if (apply_network && append_network_boot_options(&plan)) {
+    ui_error("Problem saving network config");
+    return 0;
+  }
+  status = switch_apply_boot_plan(&plan);
+  if (status != 0) {
+    if (machine_pending) {
+      show_machine_switch_error(machine, c64_core, status);
+    } else {
+      ui_error("Problem saving network config");
+    }
+    return 0;
+  }
+
+  return 1;
+}
+
+static int prepare_system_shutdown_storage(void) {
+  static int prepared = 0;
+
+  if (prepared) {
+    return 1;
+  }
+
+  ui_info("Flushing storage...");
+  if (emux_prepare_shutdown() != 0) {
+    ui_error("Problem closing emulator files");
+    return 0;
+  }
+  if (circle_prepare_system_shutdown() != 0) {
+    ui_error("Problem flushing storage");
+    return 0;
+  }
+
+  prepared = 1;
+  return 1;
+}
+
+static void perform_system_action(SystemAction action,
+                                  int force_network_save) {
+  if (rs232net_dirty && !apply_rs232net_config(1)) {
     return;
   }
-  if (save_network_cmdline()) {
-    ui_error("Problem saving network config");
+  if (!apply_pending_system_changes(force_network_save)) {
+    return;
+  }
+  if (!prepare_system_shutdown_storage()) {
+    return;
+  }
+
+  if (action == SYSTEM_ACTION_POWER_OFF) {
+    ui_info("Powering off...");
+    poweroff();
   } else {
     ui_info("Rebooting...");
     reboot();
   }
 }
+
+static void show_system_action_confirm(SystemAction action) {
+  int machine_pending = machine_change_pending();
+  int network_pending = network_menu_requires_reboot() || rs232net_dirty;
+  const char *action_text = action == SYSTEM_ACTION_POWER_OFF
+                                ? "power off"
+                                : "reboot";
+  const char *title = action == SYSTEM_ACTION_POWER_OFF
+                          ? "Power off?"
+                          : "Reboot?";
+  int confirm_id = action == SYSTEM_ACTION_POWER_OFF
+                       ? MENU_CONFIRM_SYSTEM_POWER_OFF
+                       : MENU_CONFIRM_SYSTEM_REBOOT;
+  char message[384];
+
+  if (machine_pending) {
+    char target[160];
+    machine_target_description(target, sizeof target);
+    snprintf(message, sizeof message,
+             network_pending
+                 ? "Apply %s, save pending network changes and %s? "
+                   "BMX will update config.txt and cmdline.txt."
+                 : "Apply %s and %s? BMX will update config.txt and "
+                   "cmdline.txt.",
+             target, action_text);
+  } else if (network_pending) {
+    snprintf(message, sizeof message,
+             "Save pending network changes and %s?", action_text);
+  } else {
+    snprintf(message, sizeof message,
+             "%s the Raspberry Pi now? Unsaved emulator state will be lost.",
+             action == SYSTEM_ACTION_POWER_OFF ? "Power off" : "Reboot");
+  }
+
+  ui_confirm_wrapped_cancel_default((char *)title, message, 0, confirm_id);
+}
+
+// Matches kMaximumConfigWarningBytes.  This holds all six bounded signed
+// reset descriptions without truncation while keeping the buffer local to the
+// explicit menu action.
+#define BMX_UPDATE_MENU_MESSAGE_SIZE (UI_WRAPPED_DIALOG_MAX_TEXT + 1U)
+
+/* BMX_UPDATE_MENU_FLOW_BEGIN */
+static const char *menu_update_message_or_default(const char *message,
+                                                  const char *fallback) {
+  return message[0] == '\0' ? fallback : message;
+}
+
+static int menu_update_confirm_accepting_pop;
+
+static int menu_update_is_confirm_id(int confirm_id) {
+  return confirm_id == MENU_CONFIRM_UPDATE_TEST_CHANNEL ||
+         confirm_id == MENU_CONFIRM_UPDATE_DRAFT_AUTH ||
+         confirm_id == MENU_CONFIRM_UPDATE_INSTALL ||
+         confirm_id == MENU_CONFIRM_UPDATE_RESET_WARNING ||
+         confirm_id == MENU_CONFIRM_UPDATE_RESET_INSTALL;
+}
+
+static void menu_update_confirm_popped(struct menu_item *new_root,
+                                       struct menu_item *old_root) {
+  (void)new_root;
+  (void)old_root;
+  if (!menu_update_confirm_accepting_pop) {
+    /* Escape/back is cancellation too, even though it bypasses the CANCEL
+       button's value-changed callback. */
+    emux_update_cancel_explicit();
+  }
+  menu_update_confirm_accepting_pop = 0;
+}
+
+static void menu_update_confirm_wrapped(char *title, const char *message,
+                                        int confirm_id) {
+  struct menu_item *root = ui_confirm_wrapped_cancel_default(
+      title, message, 0, confirm_id);
+  root->on_popped_off = menu_update_confirm_popped;
+}
+
+static int menu_update_require_network(void) {
+  if (emux_network_is_ready()) {
+    return 1;
+  }
+
+  ui_error_wrapped(
+      "Network is disabled or not ready. Enable Network and wait for "
+      "a connection before using Update.");
+  return 0;
+}
+
+static void menu_update_check_explicit(void);
+static void menu_update_draft_complete_explicit(void);
+
+static void menu_update_draft_begin_explicit(void) {
+  char message[BMX_UPDATE_MENU_MESSAGE_SIZE];
+  int result;
+
+  if (!menu_update_require_network()) {
+    emux_update_cancel_explicit();
+    return;
+  }
+  if (!emux_update_progress_begin_explicit()) {
+    emux_update_cancel_explicit();
+    ui_error_wrapped(
+        "The foreground update progress UI is unavailable; no draft "
+        "authorization was started.");
+    return;
+  }
+  message[0] = '\0';
+  result = emux_update_draft_begin_explicit(message, sizeof message);
+  emux_update_progress_end_explicit();
+  message[sizeof message - 1] = '\0';
+  if (result == 1) {
+    menu_update_confirm_wrapped(
+        "Authorize GitHub draft?",
+        menu_update_message_or_default(
+            message, "Authorize the prepared GitHub draft, then continue."),
+        MENU_CONFIRM_UPDATE_DRAFT_AUTH);
+  } else {
+    ui_error_wrapped(menu_update_message_or_default(
+        message, "Prepared-draft authorization could not start."));
+  }
+}
+
+static void menu_update_start_explicit(void) {
+  char label[224];
+  char message[384];
+  int channel;
+
+  label[0] = '\0';
+  channel = emux_update_channel_info(label, sizeof label);
+  label[sizeof label - 1] = '\0';
+  if (channel < 0) {
+    ui_error_wrapped(
+        "The compiled update source cannot be represented safely; no "
+        "network request was made.");
+    return;
+  }
+  if (channel == 0) {
+    menu_update_check_explicit();
+    return;
+  }
+  snprintf(message, sizeof message,
+           "%s\n\nThis debug build will check only this non-production "
+           "GitHub Releases source. Continue?", label);
+  message[sizeof message - 1] = '\0';
+  menu_update_confirm_wrapped(
+      "TEST update channel", message,
+      MENU_CONFIRM_UPDATE_TEST_CHANNEL);
+}
+
+static void menu_update_install_explicit(int destructive_reset_consent) {
+  char message[BMX_UPDATE_MENU_MESSAGE_SIZE];
+  int result;
+
+  if (!menu_update_require_network()) {
+    emux_update_cancel_explicit();
+    return;
+  }
+
+  if (!emux_update_progress_begin_explicit()) {
+    emux_update_cancel_explicit();
+    ui_error_wrapped(
+        "The foreground update progress UI is unavailable; no update "
+        "operation was started.");
+    return;
+  }
+
+  message[0] = '\0';
+  result = emux_update_install_explicit(destructive_reset_consent, message,
+                                        sizeof message);
+  emux_update_progress_end_explicit();
+  message[sizeof message - 1] = '\0';
+
+  if (result == 0) {
+    ui_info_wrapped(menu_update_message_or_default(
+        message, "Update installed successfully."));
+  } else {
+    ui_error_wrapped(menu_update_message_or_default(
+        message, "Update installation failed."));
+  }
+}
+
+static void menu_update_check_explicit(void) {
+  char message[BMX_UPDATE_MENU_MESSAGE_SIZE];
+  int result;
+
+  // This is the sole menu entry into the online check. Do not call it while
+  // building, opening or merely navigating the menu.
+  if (!menu_update_require_network()) {
+    emux_update_cancel_explicit();
+    return;
+  }
+
+  if (!emux_update_progress_begin_explicit()) {
+    emux_update_cancel_explicit();
+    ui_error_wrapped(
+        "The foreground update progress UI is unavailable; no update "
+        "check was made.");
+    return;
+  }
+
+  message[0] = '\0';
+  result = emux_update_check_explicit(message, sizeof message);
+  emux_update_progress_end_explicit();
+  message[sizeof message - 1] = '\0';
+
+  switch (result) {
+    case -1:
+      ui_error_wrapped(menu_update_message_or_default(
+          message, "Update check failed."));
+      return;
+    case 0:
+      ui_info_wrapped(menu_update_message_or_default(
+          message, "No installable update is available."));
+      return;
+    case 1:
+      menu_update_confirm_wrapped(
+          "Install update?",
+          menu_update_message_or_default(message,
+                                         "An update is available. Install it?"),
+          MENU_CONFIRM_UPDATE_INSTALL);
+      return;
+    case 2:
+      // The API supplies the exact compatibility/reset warning. Preserve it
+      // verbatim in the first, cancel-default confirmation.
+      menu_update_confirm_wrapped(
+          "Configuration reset required",
+          menu_update_message_or_default(
+              message,
+              "The update requires resetting incompatible configuration."),
+          MENU_CONFIRM_UPDATE_RESET_WARNING);
+      return;
+    default:
+      ui_error_wrapped(menu_update_message_or_default(
+          message, "Update check returned an invalid result."));
+      return;
+  }
+}
+
+static void menu_update_draft_complete_explicit(void) {
+  char message[BMX_UPDATE_MENU_MESSAGE_SIZE];
+  int result;
+
+  if (!menu_update_require_network()) {
+    emux_update_cancel_explicit();
+    return;
+  }
+  if (!emux_update_progress_begin_explicit()) {
+    emux_update_cancel_explicit();
+    ui_error_wrapped(
+        "The foreground update progress UI is unavailable; the draft "
+        "authorization was not completed.");
+    return;
+  }
+  message[0] = '\0';
+  result = emux_update_draft_complete_explicit(message, sizeof message);
+  emux_update_progress_end_explicit();
+  message[sizeof message - 1] = '\0';
+  switch (result) {
+    case -1:
+      ui_error_wrapped(menu_update_message_or_default(
+          message, "Prepared-draft check failed."));
+      return;
+    case 0:
+      ui_info_wrapped(menu_update_message_or_default(
+          message, "The prepared draft cannot be installed."));
+      return;
+    case 1:
+      menu_update_confirm_wrapped(
+          "Install prepared draft?",
+          menu_update_message_or_default(
+              message, "An authenticated prepared draft is available."),
+          MENU_CONFIRM_UPDATE_INSTALL);
+      return;
+    case 2:
+      menu_update_confirm_wrapped(
+          "Configuration reset required",
+          menu_update_message_or_default(
+              message,
+              "The prepared draft requires resetting configuration."),
+          MENU_CONFIRM_UPDATE_RESET_WARNING);
+      return;
+    case 3:
+      menu_update_confirm_wrapped(
+          "GitHub authorization pending",
+          menu_update_message_or_default(
+              message, "Complete GitHub authorization, then continue."),
+          MENU_CONFIRM_UPDATE_DRAFT_AUTH);
+      return;
+    default:
+      ui_error_wrapped("Prepared-draft check returned an invalid result.");
+      return;
+  }
+}
+
+static void menu_update_confirm_ok(int confirm_id) {
+  switch (confirm_id) {
+    case MENU_CONFIRM_UPDATE_TEST_CHANNEL:
+      menu_update_check_explicit();
+      return;
+    case MENU_CONFIRM_UPDATE_DRAFT_AUTH:
+      menu_update_draft_complete_explicit();
+      return;
+    case MENU_CONFIRM_UPDATE_INSTALL:
+      menu_update_install_explicit(0);
+      return;
+    case MENU_CONFIRM_UPDATE_RESET_WARNING:
+      menu_update_confirm_wrapped(
+          "Really reset configuration?",
+          "Confirm once more to reset the incompatible BMX configuration "
+          "and install the update. Any retained older rollback/configuration "
+          "backup is retired first.",
+          MENU_CONFIRM_UPDATE_RESET_INSTALL);
+      return;
+    case MENU_CONFIRM_UPDATE_RESET_INSTALL:
+      menu_update_install_explicit(1);
+      return;
+    default:
+      return;
+  }
+}
+/* BMX_UPDATE_MENU_FLOW_END */
 
 static void copy_text_field_value(struct menu_item *item, const char *value) {
   if (item == NULL || value == NULL) {
@@ -1280,6 +1894,107 @@ static void set_button_display(struct menu_item *item, const char *value) {
   strncpy(item->displayed_value, value, MAX_DSP_VAL_LEN - 1);
   item->displayed_value[MAX_DSP_VAL_LEN - 1] = '\0';
   item->prefer_str = 1;
+}
+
+static const char *default_disk_machine_dir(void) {
+  switch (emux_machine_class) {
+  case BMC64_MACHINE_CLASS_C64:
+    return "c64";
+  case BMC64_MACHINE_CLASS_SCPU64:
+    return "scpu64";
+  case BMC64_MACHINE_CLASS_C128:
+    return "c128";
+  case BMC64_MACHINE_CLASS_VIC20:
+    return "vic20";
+  case BMC64_MACHINE_CLASS_PLUS4:
+  case BMC64_MACHINE_CLASS_PLUS4EMU:
+    return "plus4";
+  case BMC64_MACHINE_CLASS_PET:
+    return "pet";
+  default:
+    return NULL;
+  }
+}
+
+static void default_disk_set_image(const char *path) {
+  snprintf(default_disk_image, sizeof default_disk_image, "%s",
+           path == NULL ? "" : path);
+
+  if (default_disk_image_item != NULL) {
+    snprintf(default_disk_image_item->str_value,
+             sizeof default_disk_image_item->str_value, "%s",
+             default_disk_image);
+    set_button_display(default_disk_image_item,
+                       menu_basename(default_disk_image));
+  }
+}
+
+static void default_disk_set_drive(int drive) {
+  int i;
+
+  if (drive != DEFAULT_DISK_DRIVE_NONE && (drive < 8 || drive > 11)) {
+    return;
+  }
+
+  default_disk_drive = drive;
+  if (default_disk_drive_item == NULL) {
+    return;
+  }
+
+  for (i = 0; i < default_disk_drive_item->num_choices; i++) {
+    if (default_disk_drive_item->choice_ints[i] == drive) {
+      default_disk_drive_item->value = i;
+      return;
+    }
+  }
+}
+
+static void default_disk_reset(void) {
+  const char *machine_dir = default_disk_machine_dir();
+  char path[MAX_STR_VAL_LEN];
+
+  default_disk_set_drive(8);
+  if (machine_dir == NULL) {
+    default_disk_set_image("");
+    return;
+  }
+
+  snprintf(path, sizeof path, "/utils/%s/utils.d64", machine_dir);
+  default_disk_set_image(path);
+}
+
+const char *menu_default_disk_image(void) {
+  return default_disk_image;
+}
+
+int menu_default_disk_drive(void) {
+  return default_disk_drive;
+}
+
+int menu_default_disk_prepare_volume(void) {
+  int usb = -1;
+  int *mounted = NULL;
+
+  if (strncmp(default_disk_image, "USB:", 4) == 0) {
+    usb = 0;
+    mounted = &usb1_mounted;
+  } else if (strncmp(default_disk_image, "USB2:", 5) == 0) {
+    usb = 1;
+    mounted = &usb2_mounted;
+  } else if (strncmp(default_disk_image, "USB3:", 5) == 0) {
+    usb = 2;
+    mounted = &usb3_mounted;
+  }
+
+  if (mounted == NULL || *mounted) {
+    return 1;
+  }
+  if (!circle_mount_usb(usb)) {
+    return 0;
+  }
+
+  *mounted = 1;
+  return 1;
 }
 
 static int rs232net_selected_mode(void) {
@@ -1439,120 +2154,97 @@ void menu_before_render(void) {
   refresh_dhcp_network_fields();
 }
 
-static int save_network_cmdline(void) {
-  FILE *fp = fopen("/cmdline.txt", "r");
-  char lines[16][CONFIG_TXT_LINE_LEN];
-  int line_count = 0;
-  int cmdline_index = -1;
-  char parse_line[CONFIG_TXT_LINE_LEN];
-  char replacement[CONFIG_TXT_LINE_LEN];
+static int append_network_boot_options(struct bmx_boot_plan *plan) {
+  static const char *const keys[] = {
+      "network",             "network_dhcp",
+      "network_ip",          "network_netmask",
+      "network_gateway",     "network_dns",
+      "network_ssid",        "network_psk",
+      "network_country",     "network_wait_ms",
+      "network_test_host",   "network_test_port",
+      "rs232net",            "rs232net_mode",
+      "rs232net_interface",  "rs232net_target",
+      "rs232net_phonebook",  "rs232net_baud",
+      "rs232net_ip232",      "rs232net_hayes_audio",
+      "rs232net_ascii_case",
+  };
+  char baud[8];
 
-  parse_line[0] = '\0';
-  replacement[0] = '\0';
-
-  if (fp != NULL) {
-    while (line_count < (int)(sizeof lines / sizeof lines[0]) &&
-           fgets(lines[line_count], CONFIG_TXT_LINE_LEN - 1, fp) != NULL) {
-      if (cmdline_index < 0 && cmdline_content_line(lines[line_count])) {
-        cmdline_index = line_count;
-        strncpy(parse_line, lines[line_count], sizeof parse_line - 1);
-        parse_line[sizeof parse_line - 1] = '\0';
-      }
-      ++line_count;
+  for (unsigned i = 0; i < sizeof keys / sizeof keys[0]; ++i) {
+    if (bmx_boot_plan_manage_cmdline_key(plan, keys[i]) != 0) {
+      return 1;
     }
-    fclose(fp);
-  }
-
-  char *option = strtok(parse_line, " \r\n");
-  while (option != NULL) {
-    char *key;
-    char *eq = strchr(option, '=');
-    key = option;
-    if (eq != NULL) {
-      *eq = '\0';
-    }
-    if (key != NULL && !network_key(key)) {
-      if (strlen(replacement) > 0) {
-        strcat(replacement, " ");
-      }
-      strcat(replacement, key);
-      if (eq != NULL) {
-        strcat(replacement, "=");
-        strcat(replacement, eq + 1);
-      }
-    }
-    option = strtok(NULL, " \r\n");
   }
 
   if (network_adapter_item->value == 1 || network_adapter_item->value == 2) {
-    append_network_option(replacement, "network",
-                          network_adapter_item->value == 1 ? "ethernet"
-                                                           : "wifi");
-    append_network_option(replacement, "network_dhcp",
-                          network_dhcp_item->value ? "1" : "0");
-    append_network_option(replacement, "network_wait_ms", "0");
+    if (append_network_option(plan, "network",
+                              network_adapter_item->value == 1 ? "ethernet"
+                                                               : "wifi") ||
+        append_network_option(plan, "network_dhcp",
+                              network_dhcp_item->value ? "1" : "0") ||
+        append_network_option(plan, "network_wait_ms", "0")) {
+      return 1;
+    }
     if (network_adapter_item->value == 2) {
-      append_network_option_encoded(replacement, "network_ssid",
-                                    network_wifi_ssid_item->str_value);
-      append_network_option_encoded(replacement, "network_psk",
-                                    network_wifi_psk_item->str_value);
-      append_network_option(replacement, "network_country",
-                            network_wifi_country_item->str_value);
+      if (append_network_option_encoded(plan, "network_ssid",
+                                        network_wifi_ssid_item->str_value) ||
+          append_network_option_encoded(plan, "network_psk",
+                                        network_wifi_psk_item->str_value) ||
+          append_network_option(plan, "network_country",
+                                network_wifi_country_item->str_value)) {
+        return 1;
+      }
     }
     if (!network_dhcp_item->value) {
-      append_network_option(replacement, "network_ip",
-                            network_ip_item->str_value);
-      append_network_option(replacement, "network_netmask",
-                            network_netmask_item->str_value);
-      append_network_option(replacement, "network_gateway",
-                            network_gateway_item->str_value);
-      append_network_option(replacement, "network_dns",
-                            network_dns_item->str_value);
+      if (append_network_option(plan, "network_ip",
+                                network_ip_item->str_value) ||
+          append_network_option(plan, "network_netmask",
+                                network_netmask_item->str_value) ||
+          append_network_option(plan, "network_gateway",
+                                network_gateway_item->str_value) ||
+          append_network_option(plan, "network_dns",
+                                network_dns_item->str_value)) {
+        return 1;
+      }
     }
   }
   if (rs232net_enable_item->value) {
-    append_network_option(replacement, "rs232net", "1");
-    append_network_option(
-        replacement, "rs232net_mode",
-        rs232net_mode_key(
-            rs232net_mode_item->choice_ints[rs232net_mode_item->value]));
-    append_network_option(
-        replacement, "rs232net_interface",
-        rs232net_interface_key(
-            rs232net_interface_item->choice_ints[rs232net_interface_item->value]));
-    append_network_option(replacement, "rs232net_target",
-                          rs232net_target_item->str_value);
-    append_network_option(replacement, "rs232net_phonebook",
-                          rs232net_phonebook_item->str_value);
-    char baud[8];
     snprintf(baud, sizeof baud, "%d",
              rs232net_baud_item->choice_ints[rs232net_baud_item->value]);
-    append_network_option(replacement, "rs232net_baud", baud);
-    append_network_option(replacement, "rs232net_ip232",
-                          rs232net_ip232_item->value ? "1" : "0");
-    append_network_option(
-        replacement, "rs232net_hayes_audio",
-        hayes_audio_key(
-            rs232net_hayes_audio_item->choice_ints[
-                rs232net_hayes_audio_item->value]));
-  }
-
-  fp = fopen("/cmdline.txt", "w");
-  if (fp == NULL) {
-    return 1;
-  }
-  if (cmdline_index < 0) {
-    fprintf(fp, "%s\n", replacement);
-  }
-  for (int i = 0; i < line_count; ++i) {
-    if (i == cmdline_index) {
-      fprintf(fp, "%s\n", replacement);
-    } else {
-      fputs(lines[i], fp);
+    if (append_network_option(plan, "rs232net", "1") ||
+        append_network_option(
+            plan, "rs232net_mode",
+            rs232net_mode_key(
+                rs232net_mode_item->choice_ints[rs232net_mode_item->value])) ||
+        append_network_option(
+            plan, "rs232net_interface",
+            rs232net_interface_key(rs232net_interface_item->choice_ints[
+                rs232net_interface_item->value])) ||
+        append_network_option_encoded(plan, "rs232net_target",
+                                      rs232net_target_item->str_value) ||
+        append_network_option_encoded(plan, "rs232net_phonebook",
+                                      rs232net_phonebook_item->str_value) ||
+        append_network_option(plan, "rs232net_baud", baud) ||
+        append_network_option(plan, "rs232net_ip232",
+                              rs232net_ip232_item->value ? "1" : "0") ||
+        append_network_option(
+            plan, "rs232net_hayes_audio",
+            hayes_audio_key(rs232net_hayes_audio_item->choice_ints[
+                rs232net_hayes_audio_item->value]))) {
+      return 1;
     }
   }
-  fclose(fp);
   return 0;
+}
+
+static int save_network_cmdline(void) {
+  struct bmx_boot_plan plan;
+
+  bmx_boot_plan_init(&plan);
+  if (append_network_boot_options(&plan) != 0) {
+    return 1;
+  }
+  return switch_apply_boot_plan(&plan);
 }
 
 static void mark_rs232net_dirty(void) {
@@ -1617,16 +2309,35 @@ static int apply_rs232net_config(int strict) {
 }
 
 int menu_before_ui_close(void) {
+  int machine_pending;
+  int network_pending;
+
   if (rs232net_dirty) {
     if (!apply_rs232net_config(1)) {
       return 0;
     }
   }
-  if (network_menu_requires_reboot()) {
-    if (!network_reboot_confirm_open) {
-      network_reboot_confirm_open = 1;
-      ui_confirm_wrapped("Reboot?", NETWORK_REBOOT_MSG,
-                         MENU_NETWORK_SAVE, MENU_NETWORK_SAVE);
+  machine_pending = machine_change_pending();
+  network_pending = network_menu_requires_reboot();
+  if (machine_pending || network_pending) {
+    if (!pending_reboot_confirm_open) {
+      const char *message = NETWORK_REBOOT_MSG;
+      char machine_message[256];
+      char target[160];
+      struct menu_item *confirm_root;
+
+      if (machine_pending) {
+        machine_target_description(target, sizeof target);
+        snprintf(machine_message, sizeof machine_message,
+                 network_pending ? MACHINE_NETWORK_SWITCH_MSG
+                                 : MACHINE_SWITCH_MSG,
+                 target);
+        message = machine_message;
+      }
+      pending_reboot_confirm_open = 1;
+      confirm_root = ui_confirm_wrapped_cancel_default(
+          "Reboot?", message, 0, MENU_PENDING_REBOOT);
+      confirm_root->on_popped_off = pending_reboot_confirm_popped;
     }
     return 0;
   }
@@ -1639,7 +2350,7 @@ static void build_network_menu(struct menu_item *root) {
   load_network_cmdline();
   network_saved_state = network_state;
   network_scan_requires_reboot = 0;
-  network_reboot_confirm_open = 0;
+  pending_reboot_confirm_open = 0;
 
   child = network_adapter_item =
       ui_menu_add_multiple_choice(MENU_NETWORK_ADAPTER, root, "Adapter");
@@ -2050,6 +2761,9 @@ static int save_settings() {
   case BMC64_MACHINE_CLASS_C64:
     fp = fopen("/settings.txt", "w");
     break;
+  case BMC64_MACHINE_CLASS_SCPU64:
+    fp = fopen("/settings-scpu64.txt", "w");
+    break;
   case BMC64_MACHINE_CLASS_C128:
     fp = fopen("/settings-c128.txt", "w");
     break;
@@ -2120,6 +2834,7 @@ static int save_settings() {
   fprintf(fp, "hotkey_tf7=%d\n", hotkey_tf7_item->value);
   // Can't change the 'overlay_*' names, legacy.
   fprintf(fp, "overlay=%d\n", statusbar_item->value);
+  fprintf(fp, "diagnostics_overlay=%d\n", diagnostics_overlay_item->value);
   fprintf(fp, "overlay_padding=%d\n", statusbar_padding_item->value);
   fprintf(fp, "vkbd_trans=%d\n", vkbd_transparency_item->value);
   fprintf(fp, "tapereset=%d\n", tape_reset_with_machine_item->value);
@@ -2140,6 +2855,9 @@ static int save_settings() {
      fprintf(fp, "h_stretch_1=%d\n", h_stretch_item[1]->value);
      fprintf(fp, "v_stretch_1=%d\n", v_stretch_item[1]->value);
   }
+
+  fprintf(fp, "default_disk_image=%s\n", default_disk_image);
+  fprintf(fp, "default_disk_drive=%d\n", default_disk_drive);
 
   int drive_type;
 
@@ -2181,6 +2899,9 @@ static int save_settings() {
   fprintf(fp, "key_binding_6=%d\n", key_bindings[5]);
 
   fprintf(fp, "volume=%d\n", volume_item->value);
+  fprintf(fp, "sound_output_priority=%d\n",
+          sound_output_priority_item->choice_ints[
+              sound_output_priority_item->value]);
   fprintf(fp, "dir_convention=%d\n", dir_convention_item->value);
   fprintf(fp, "use_int_scaling_0=%d\n", use_scaling_params_item[0]->value);
   if (emux_machine_class == BMC64_MACHINE_CLASS_C128) {
@@ -2213,6 +2934,42 @@ static int save_settings() {
   return 0;
 }
 
+static void apply_sound_output_priority_setting(int value) {
+  sound_output_priority_item->value =
+      value == SOUND_OUTPUT_PRIORITY_USB_HDMI ? 1 : 0;
+}
+
+static int load_sound_output_priority_setting(const char *path) {
+  FILE *fp = fopen(path, "r");
+  if (fp == NULL) {
+    return 0;
+  }
+
+  char name_value[256];
+  while (1) {
+    char *line = fgets(name_value, 255, fp);
+    if (feof(fp) || line == NULL) break;
+
+    char *name;
+    char *value_str;
+    get_key_and_value(name_value, &name, &value_str);
+    if (!name || !value_str ||
+        strlen(name) == 0 ||
+        strlen(value_str) == 0) {
+      continue;
+    }
+
+    if (strcmp(name, "sound_output_priority") == 0) {
+      apply_sound_output_priority_setting(atoi(value_str));
+      fclose(fp);
+      return 1;
+    }
+  }
+
+  fclose(fp);
+  return 0;
+}
+
 // Make joydev reflect menu choice
 static void ui_set_joy_devs() {
   if (port_1_menu_item) {
@@ -2235,6 +2992,7 @@ static void ui_set_joy_devs() {
 static void load_settings() {
 
   int tmp_value;
+  int sound_output_priority_loaded = 0;
 
   emux_get_int(Setting_DriveSoundEmulation, &drive_sounds_item->value);
   emux_get_int(Setting_DriveSoundEmulationVolume, &drive_sounds_vol_item->value);
@@ -2265,6 +3023,9 @@ static void load_settings() {
   case BMC64_MACHINE_CLASS_C64:
     fp = fopen("/settings.txt", "r");
     break;
+  case BMC64_MACHINE_CLASS_SCPU64:
+    fp = fopen("/settings-scpu64.txt", "r");
+    break;
   case BMC64_MACHINE_CLASS_C128:
     fp = fopen("/settings-c128.txt", "r");
     break;
@@ -2286,6 +3047,9 @@ static void load_settings() {
   }
 
   if (fp == NULL) {
+    if (emux_machine_class == BMC64_MACHINE_CLASS_SCPU64) {
+      load_sound_output_priority_setting("/settings.txt");
+    }
     emux_load_settings_done();
     return;
   }
@@ -2325,6 +3089,10 @@ static void load_settings() {
       port_3_menu_item->value = value;
     } else if (port_4_menu_item && strcmp(name, "port_4") == 0) {
       port_4_menu_item->value = value;
+    } else if (strcmp(name, "default_disk_image") == 0) {
+      default_disk_set_image(value_str);
+    } else if (strcmp(name, "default_disk_drive") == 0) {
+      default_disk_set_drive(value);
     } else if (strcmp(name, "palette") == 0) {
       palette_item[0]->value = value;
       if (value >= palette_item[0]->num_choices) {
@@ -2340,6 +3108,8 @@ static void load_settings() {
       hotkey_cf7_item->value = HOTKEY_CHOICE_MENU;
     } else if (strcmp(name, "overlay") == 0) { // legacy name
       statusbar_item->value = value;
+    } else if (strcmp(name, "diagnostics_overlay") == 0) {
+      diagnostics_overlay_item->value = value;
     } else if (strcmp(name, "overlay_padding") == 0) { // legacy name
       statusbar_padding_item->value = value;
     } else if (strcmp(name, "vkbd_trans") == 0) {
@@ -2509,6 +3279,9 @@ static void load_settings() {
       v_stretch_item[1]->value = value;
     } else if (strcmp(name, "volume") == 0) {
       volume_item->value = value;
+    } else if (strcmp(name, "sound_output_priority") == 0) {
+      apply_sound_output_priority_setting(value);
+      sound_output_priority_loaded = 1;
     } else if (strcmp(name, "dir_convention") == 0) {
       dir_convention_item->value = value;
     } else if (strcmp(name, "use_int_scaling_0") == 0) {
@@ -2579,6 +3352,11 @@ static void load_settings() {
     }
   }
   fclose(fp);
+
+  if (emux_machine_class == BMC64_MACHINE_CLASS_SCPU64 &&
+      !sound_output_priority_loaded) {
+    load_sound_output_priority_setting("/settings.txt");
+  }
 
   emux_load_settings_done();
 
@@ -2662,6 +3440,10 @@ static void select_file(struct menu_item *item) {
          ui_pop_all_and_toggle();
        }
        return;
+     case MENU_DEFAULT_DISK_FILE:
+       default_disk_set_image(fullpath(DIR_DISKS, item->str_value));
+       ui_pop_menu();
+       return;
      case MENU_DISK_FILE:
        // Perform the attach
        ui_info("Attaching...");
@@ -2710,7 +3492,7 @@ static void select_file(struct menu_item *item) {
        return;
      case MENU_AUTOSTART_FILE:
        ui_info("Starting...");
-       if (emux_autostart_file(fullpath(DIR_ROOT, item->str_value)) < 0) {
+       if (emux_autostart_file(fullpath(DIR_DISKS, item->str_value)) < 0) {
          ui_pop_menu();
          ui_error("Failed to autostart file");
        } else {
@@ -2833,6 +3615,7 @@ static int menu_file_item_to_dir_index(struct menu_item *item) {
   case MENU_LOAD_SNAP_FILE:
   case MENU_SAVE_SNAP_FILE:
     return DIR_SNAPS;
+  case MENU_DEFAULT_DISK_FILE:
   case MENU_DISK_FILE:
   case MENU_CREATE_D64_FILE:
   case MENU_CREATE_D67_FILE:
@@ -2885,9 +3668,10 @@ static int menu_file_item_to_dir_index(struct menu_item *item) {
   case MENU_DRIVE_ROM_FILE_1571:
   case MENU_DRIVE_ROM_FILE_1581:
     return DIR_ROMS;
-  case MENU_AUTOSTART_FILE:
   case MENU_LOADPRG_FILE:
     return DIR_ROOT;
+  case MENU_AUTOSTART_FILE:
+    return DIR_DISKS;
   case MENU_RS232NET_PHONEBOOK_FILE:
     return DIR_PHONEBOOK;
   case MENU_IEC_DIR:
@@ -2907,6 +3691,7 @@ static void relist_files_after_dir_change(int menu_id) {
   case MENU_SAVE_SNAP_FILE:
     show_files(DIR_SNAPS, FILTER_SNAP, menu_id, 1);
     break;
+  case MENU_DEFAULT_DISK_FILE:
   case MENU_DISK_FILE:
   case MENU_CREATE_D64_FILE:
   case MENU_CREATE_D67_FILE:
@@ -2972,7 +3757,7 @@ static void relist_files_after_dir_change(int menu_id) {
     show_files(DIR_ROMS, FILTER_NONE, menu_id, 1);
     break;
   case MENU_AUTOSTART_FILE:
-    show_files(DIR_ROOT, FILTER_NONE, menu_id, 1);
+    show_files(DIR_DISKS, FILTER_NONE, menu_id, 1);
     break;
   case MENU_LOADPRG_FILE:
     show_files(DIR_ROOT, FILTER_PRGS, menu_id, 1);
@@ -3217,6 +4002,10 @@ static void reset_shader_params() {
   s_output_gamma_item->value = 220;
 }
 
+static int allow_shader_autostart() {
+  return allow_shader() && circle_get_model() < 4;
+}
+
 static void sanity_check_shader_params(int itemid) {
     // All shader items should be disabled if shader is off
     s_curvature_item->disabled = 0;
@@ -3349,7 +4138,6 @@ static void handle_shader_param_change() {
 
 // Interpret what menu item changed and make the change to vice
 static void menu_value_changed(struct menu_item *item) {
-  struct machine_entry* head;
   int status = 0;
   int p;
 
@@ -3415,8 +4203,15 @@ static void menu_value_changed(struct menu_item *item) {
   case MENU_AUTOSTART_WARP:
     emux_set_int(Setting_AutostartWarp, item->value);
     return;
+  case MENU_DEFAULT_DISK_IMAGE:
+    show_files(DIR_DISKS, FILTER_DISK, MENU_DEFAULT_DISK_FILE, 0);
+    return;
+  case MENU_DEFAULT_DISK_DRIVE:
+    default_disk_set_drive(item->choice_ints[item->value]);
+    return;
   case MENU_AUTOSTART:
-    show_files(DIR_ROOT, FILTER_NONE, MENU_AUTOSTART_FILE, 0);
+    // Autostart targets drive 8, so share its directory with disk attach.
+    show_files(DIR_DISKS, FILTER_NONE, MENU_AUTOSTART_FILE, 0);
     return;
   case MENU_LOADPRG:
     show_files(DIR_ROOT, FILTER_PRGS, MENU_LOADPRG_FILE, 0);
@@ -3741,7 +4536,19 @@ static void menu_value_changed(struct menu_item *item) {
     demo_reset();
     return;
   case MENU_NETWORK_SAVE:
-    save_network_and_reboot();
+    perform_system_action(SYSTEM_ACTION_REBOOT, 1);
+    return;
+  case MENU_SYSTEM_REBOOT:
+    show_system_action_confirm(SYSTEM_ACTION_REBOOT);
+    return;
+  case MENU_SYSTEM_POWER_OFF:
+    show_system_action_confirm(SYSTEM_ACTION_POWER_OFF);
+    return;
+  case MENU_SYSTEM_UPDATE:
+    menu_update_start_explicit();
+    return;
+  case MENU_SYSTEM_UPDATE_DRAFT:
+    menu_update_draft_begin_explicit();
     return;
   case MENU_NETWORK_WIFI_AP_SELECT:
     copy_text_field_value(network_wifi_ssid_item, item->str_value);
@@ -4052,6 +4859,9 @@ static void menu_value_changed(struct menu_item *item) {
       overlay_statusbar_disable();
     }
     break;
+  case MENU_DIAGNOSTICS_OVERLAY:
+    overlay_diagnostics_set_mode(item->value);
+    break;
   case MENU_OVERLAY_PADDING:
     overlay_change_padding(item->value);
     break;
@@ -4065,41 +4875,43 @@ static void menu_value_changed(struct menu_item *item) {
   case MENU_VOLUME:
     circle_set_volume(item->value);
     break;
-  case MENU_SWITCH_MACHINE:
-    ui_confirm_wrapped("Reboot?",SWITCH_MSG,item->value,MENU_SWITCH_MACHINE);
+  case MENU_SOUND_OUTPUT_PRIORITY:
+    circle_set_sound_output_priority(item->choice_ints[item->value]);
     break;
-  case MENU_CONFIRM_OK:
-    ui_pop_menu();
-    if (item->sub_id == MENU_SWITCH_MACHINE) {
-      load_machines(&head);
-      struct machine_entry* ptr = head;
-      status = 0;
-      while (ptr) {
-          if (ptr->id == item->value) {
-            status = switch_apply_files(ptr);
-            break;
-          }
-          ptr = ptr->next;
-      }
-      free_machines(head);
-      if (status) {
-         char failcode[32];
-         sprintf (failcode, "FAILURE (CODE %d)", status);
-         ui_confirm_wrapped(failcode, SWITCH_FAIL_MSG,-1,-1);
-      } else {
-         reboot();
-      }
-    } else if (item->sub_id == MENU_NETWORK_SAVE) {
-      network_reboot_confirm_open = 0;
-      save_network_and_reboot();
-    }
-    break;
-  case MENU_CONFIRM_CANCEL:
-    if (item->sub_id == MENU_NETWORK_SAVE) {
-      network_reboot_confirm_open = 0;
+  case MENU_MACHINE_EMULATOR:
+  case MENU_MACHINE_VIDEO_STANDARD:
+  case MENU_MACHINE_VIDEO_OUTPUT:
+  case MENU_MACHINE_VIDEO_MODE:
+    machine_selection_changed(item);
+    return;
+  case MENU_CONFIRM_OK: {
+    int confirm_sub_id = item->sub_id;
+    if (menu_update_is_confirm_id(confirm_sub_id)) {
+      menu_update_confirm_accepting_pop = 1;
     }
     ui_pop_menu();
+    if (confirm_sub_id == MENU_PENDING_REBOOT) {
+      perform_system_action(SYSTEM_ACTION_REBOOT, 0);
+    } else if (confirm_sub_id == MENU_CONFIRM_SYSTEM_REBOOT) {
+      perform_system_action(SYSTEM_ACTION_REBOOT, 0);
+    } else if (confirm_sub_id == MENU_CONFIRM_SYSTEM_POWER_OFF) {
+      perform_system_action(SYSTEM_ACTION_POWER_OFF, 0);
+    } else {
+      menu_update_confirm_ok(confirm_sub_id);
+    }
     break;
+  }
+  case MENU_CONFIRM_CANCEL: {
+    if (item->sub_id == MENU_CONFIRM_UPDATE_TEST_CHANNEL ||
+        item->sub_id == MENU_CONFIRM_UPDATE_DRAFT_AUTH ||
+        item->sub_id == MENU_CONFIRM_UPDATE_INSTALL ||
+        item->sub_id == MENU_CONFIRM_UPDATE_RESET_WARNING ||
+        item->sub_id == MENU_CONFIRM_UPDATE_RESET_INSTALL) {
+      emux_update_cancel_explicit();
+    }
+    ui_pop_menu();
+    break;
+  }
   case MENU_DIR_CONVENTION:
     set_current_dir_names();
     break;
@@ -4108,7 +4920,12 @@ static void menu_value_changed(struct menu_item *item) {
     ui_canvas_reveal_temp(FB_LAYER_VIC);
     // Despite what the menu says, don't allow this to enable the shader
     // when conditions apply.
-    circle_realloc_fbl(FB_LAYER_VIC, allow_shader() ? item->value : 0);
+    status = circle_realloc_fbl(FB_LAYER_VIC, allow_shader() ? item->value : 0);
+    if (status != 0) {
+      printf("menu: shader enable failed with %d; disabling\r\n", status);
+      item->value = 0;
+      s_enable_shader_item->value = 0;
+    }
     emux_set_int(Setting_VideoFilter, item->value ? MENU_VIDEO_FILTER_CRT : MENU_VIDEO_FILTER_NONE);
     handle_shader_param_change();
     vic_showing = 0;
@@ -4232,7 +5049,7 @@ void emu_get_usb_pref(int device, int *usb_pref_dst, int *x_axis, int *y_axis,
 
 // KEEP in sync with kernel.cpp, kbd.c, menu_usb.c
 static void set_hotkey_choices(struct menu_item *item) {
-  item->num_choices = 16;
+  item->num_choices = 22;
   strcpy(item->choices[HOTKEY_CHOICE_NONE], function_to_string(BTN_ASSIGN_UNDEF));
   strcpy(item->choices[HOTKEY_CHOICE_MENU], function_to_string(BTN_ASSIGN_MENU));
   strcpy(item->choices[HOTKEY_CHOICE_WARP], function_to_string(BTN_ASSIGN_WARP));
@@ -4249,6 +5066,12 @@ static void set_hotkey_choices(struct menu_item *item) {
   strcpy(item->choices[HOTKEY_CHOICE_PIP_SWAP], function_to_string(BTN_ASSIGN_PIP_SWAP));
   strcpy(item->choices[HOTKEY_CHOICE_40_80_COLUMN], function_to_string(BTN_ASSIGN_40_80_COLUMN));
   strcpy(item->choices[HOTKEY_CHOICE_FLUSH_DISK], function_to_string(BTN_ASSIGN_FLUSH_DISK));
+  strcpy(item->choices[HOTKEY_CHOICE_ATTACH_TAPE], function_to_string(BTN_ASSIGN_ATTACH_TAPE));
+  strcpy(item->choices[HOTKEY_CHOICE_ATTACH_CART], function_to_string(BTN_ASSIGN_ATTACH_CART));
+  strcpy(item->choices[HOTKEY_CHOICE_ATTACH_DISK_8], function_to_string(BTN_ASSIGN_ATTACH_DISK_8));
+  strcpy(item->choices[HOTKEY_CHOICE_ATTACH_DISK_9], function_to_string(BTN_ASSIGN_ATTACH_DISK_9));
+  strcpy(item->choices[HOTKEY_CHOICE_ATTACH_DISK_10], function_to_string(BTN_ASSIGN_ATTACH_DISK_10));
+  strcpy(item->choices[HOTKEY_CHOICE_ATTACH_DISK_11], function_to_string(BTN_ASSIGN_ATTACH_DISK_11));
   item->choice_ints[HOTKEY_CHOICE_NONE] = BTN_ASSIGN_UNDEF;
   item->choice_ints[HOTKEY_CHOICE_MENU] = BTN_ASSIGN_MENU;
   item->choice_ints[HOTKEY_CHOICE_WARP] = BTN_ASSIGN_WARP;
@@ -4265,12 +5088,19 @@ static void set_hotkey_choices(struct menu_item *item) {
   item->choice_ints[HOTKEY_CHOICE_PIP_SWAP] = BTN_ASSIGN_PIP_SWAP;
   item->choice_ints[HOTKEY_CHOICE_40_80_COLUMN] = BTN_ASSIGN_40_80_COLUMN;
   item->choice_ints[HOTKEY_CHOICE_FLUSH_DISK] = BTN_ASSIGN_FLUSH_DISK;
+  item->choice_ints[HOTKEY_CHOICE_ATTACH_TAPE] = BTN_ASSIGN_ATTACH_TAPE;
+  item->choice_ints[HOTKEY_CHOICE_ATTACH_CART] = BTN_ASSIGN_ATTACH_CART;
+  item->choice_ints[HOTKEY_CHOICE_ATTACH_DISK_8] = BTN_ASSIGN_ATTACH_DISK_8;
+  item->choice_ints[HOTKEY_CHOICE_ATTACH_DISK_9] = BTN_ASSIGN_ATTACH_DISK_9;
+  item->choice_ints[HOTKEY_CHOICE_ATTACH_DISK_10] = BTN_ASSIGN_ATTACH_DISK_10;
+  item->choice_ints[HOTKEY_CHOICE_ATTACH_DISK_11] = BTN_ASSIGN_ATTACH_DISK_11;
 
   if (emux_machine_class == BMC64_MACHINE_CLASS_VIC20) {
      item->choice_disabled[HOTKEY_CHOICE_SWAP_PORTS] = 1;
   }
 
   if (emux_machine_class != BMC64_MACHINE_CLASS_C64 &&
+      emux_machine_class != BMC64_MACHINE_CLASS_SCPU64 &&
       emux_machine_class != BMC64_MACHINE_CLASS_C128) {
      item->choice_disabled[HOTKEY_CHOICE_CART_FREEZE] = 1;
   }
@@ -4281,65 +5111,385 @@ static void set_hotkey_choices(struct menu_item *item) {
      item->choice_disabled[HOTKEY_CHOICE_PIP_SWAP] = 1;
      item->choice_disabled[HOTKEY_CHOICE_40_80_COLUMN] = 1;
   }
+
+  if (emux_machine_class == BMC64_MACHINE_CLASS_PET) {
+     item->choice_disabled[HOTKEY_CHOICE_ATTACH_CART] = 1;
+  }
+
+  if (emux_machine_class == BMC64_MACHINE_CLASS_PLUS4EMU) {
+     item->choice_disabled[HOTKEY_CHOICE_ATTACH_CART] = 1;
+     item->choice_disabled[HOTKEY_CHOICE_ATTACH_DISK_9] = 1;
+     item->choice_disabled[HOTKEY_CHOICE_ATTACH_DISK_10] = 1;
+     item->choice_disabled[HOTKEY_CHOICE_ATTACH_DISK_11] = 1;
+  }
+}
+
+static BMC64MachineClass machine_emulator_class(MachineEmulator emulator) {
+  switch (emulator) {
+    case MACHINE_EMULATOR_X64:
+    case MACHINE_EMULATOR_X64SC:
+      return BMC64_MACHINE_CLASS_C64;
+    case MACHINE_EMULATOR_XSCPU64:
+      return BMC64_MACHINE_CLASS_SCPU64;
+    case MACHINE_EMULATOR_X128:
+      return BMC64_MACHINE_CLASS_C128;
+    case MACHINE_EMULATOR_XVIC:
+      return BMC64_MACHINE_CLASS_VIC20;
+    case MACHINE_EMULATOR_XPLUS4:
+      return BMC64_MACHINE_CLASS_PLUS4;
+    case MACHINE_EMULATOR_XPLUS4EMU:
+      return BMC64_MACHINE_CLASS_PLUS4EMU;
+    case MACHINE_EMULATOR_XPET:
+      return BMC64_MACHINE_CLASS_PET;
+    default:
+      return BMC64_MACHINE_CLASS_UNKNOWN;
+  }
+}
+
+static BMC64C64Core machine_emulator_c64_core(MachineEmulator emulator) {
+  if (emulator == MACHINE_EMULATOR_X64) {
+    return BMC64_C64_CORE_X64;
+  }
+  if (emulator == MACHINE_EMULATOR_X64SC) {
+    return BMC64_C64_CORE_X64SC;
+  }
+  return BMC64_C64_CORE_UNKNOWN;
+}
+
+static const char *machine_emulator_name(MachineEmulator emulator) {
+  switch (emulator) {
+    case MACHINE_EMULATOR_X64: return "x64";
+    case MACHINE_EMULATOR_X64SC: return "x64sc";
+    case MACHINE_EMULATOR_XSCPU64: return "xscpu64";
+    case MACHINE_EMULATOR_X128: return "x128";
+    case MACHINE_EMULATOR_XVIC: return "xvic";
+    case MACHINE_EMULATOR_XPLUS4: return "xplus4";
+    case MACHINE_EMULATOR_XPLUS4EMU: return "xplus4emu";
+    case MACHINE_EMULATOR_XPET: return "xpet";
+    default: return "Unknown";
+  }
+}
+
+static MachineEmulator current_machine_emulator(void) {
+  switch (emux_machine_class) {
+    case BMC64_MACHINE_CLASS_C64:
+      return emux_c64_core == BMC64_C64_CORE_X64SC
+                 ? MACHINE_EMULATOR_X64SC
+                 : MACHINE_EMULATOR_X64;
+    case BMC64_MACHINE_CLASS_SCPU64: return MACHINE_EMULATOR_XSCPU64;
+    case BMC64_MACHINE_CLASS_C128: return MACHINE_EMULATOR_X128;
+    case BMC64_MACHINE_CLASS_VIC20: return MACHINE_EMULATOR_XVIC;
+    case BMC64_MACHINE_CLASS_PLUS4: return MACHINE_EMULATOR_XPLUS4;
+    case BMC64_MACHINE_CLASS_PLUS4EMU: return MACHINE_EMULATOR_XPLUS4EMU;
+    case BMC64_MACHINE_CLASS_PET: return MACHINE_EMULATOR_XPET;
+    default: return MACHINE_EMULATOR_UNKNOWN;
+  }
+}
+
+static MachineEmulator machine_selected_emulator(void) {
+  if (machine_emulator_item == NULL || machine_emulator_item->num_choices == 0) {
+    return MACHINE_EMULATOR_UNKNOWN;
+  }
+  return (MachineEmulator)machine_emulator_item->choice_ints[
+      machine_emulator_item->value];
+}
+
+static BMC64C64Core machine_selected_c64_core(void) {
+  return machine_emulator_c64_core(machine_selected_emulator());
+}
+
+static void machine_reset_choices(struct menu_item *item) {
+  item->num_choices = 0;
+  item->value = 0;
+  item->disabled = 0;
+  memset(item->choices, 0, sizeof item->choices);
+  memset(item->choice_ints, 0, sizeof item->choice_ints);
+  memset(item->choice_disabled, 0, sizeof item->choice_disabled);
+}
+
+static int machine_choice_index(struct menu_item *item, int value) {
+  int i;
+
+  for (i = 0; i < item->num_choices; i++) {
+    if (item->choice_ints[i] == value) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static void machine_add_choice(struct menu_item *item, const char *name,
+                               int value) {
+  int choice;
+
+  if (machine_choice_index(item, value) >= 0 ||
+      item->num_choices >= MAX_CHOICES) {
+    return;
+  }
+  choice = item->num_choices++;
+  snprintf(item->choices[choice], sizeof item->choices[choice], "%s", name);
+  item->choice_ints[choice] = value;
+}
+
+static int machine_has_class(BMC64MachineClass machine_class) {
+  return bmx_machine_by_class(machine_config, machine_class) != NULL;
+}
+
+static void machine_populate_emulators(MachineEmulator preferred) {
+  static const MachineEmulator emulators[] = {
+      MACHINE_EMULATOR_X64, MACHINE_EMULATOR_X64SC,
+      MACHINE_EMULATOR_XSCPU64, MACHINE_EMULATOR_X128,
+      MACHINE_EMULATOR_XVIC, MACHINE_EMULATOR_XPLUS4,
+      MACHINE_EMULATOR_XPLUS4EMU, MACHINE_EMULATOR_XPET,
+  };
+  int i;
+
+  machine_reset_choices(machine_emulator_item);
+  for (i = 0; i < (int)(sizeof emulators / sizeof emulators[0]); i++) {
+    MachineEmulator emulator = emulators[i];
+    if (machine_has_class(machine_emulator_class(emulator))) {
+      machine_add_choice(machine_emulator_item,
+                         machine_emulator_name(emulator), emulator);
+    }
+  }
+  i = machine_choice_index(machine_emulator_item, preferred);
+  machine_emulator_item->value = i >= 0 ? i : 0;
+  machine_emulator_item->disabled = machine_emulator_item->num_choices < 2;
+}
+
+static const struct bmx_machine *machine_selected_machine(void) {
+  return bmx_machine_by_class(
+      machine_config, machine_emulator_class(machine_selected_emulator()));
+}
+
+static BMC64VideoStandard machine_selected_standard(void) {
+  if (machine_standard_item == NULL || machine_standard_item->num_choices == 0) {
+    return BMC64_VIDEO_STANDARD_UNKNOWN;
+  }
+  return (BMC64VideoStandard)machine_standard_item->choice_ints[
+      machine_standard_item->value];
+}
+
+static BMC64VideoOut machine_selected_output(void) {
+  if (machine_output_item == NULL || machine_output_item->num_choices == 0) {
+    return BMC64_VIDEO_OUT_UNKNOWN;
+  }
+  return (BMC64VideoOut)machine_output_item->choice_ints[
+      machine_output_item->value];
+}
+
+static const struct bmx_machine_mode *machine_selected_mode(void) {
+  const struct bmx_machine *machine = machine_selected_machine();
+  int mode_index;
+
+  if (machine == NULL || machine_mode_item == NULL ||
+      machine_mode_item->num_choices == 0) {
+    return NULL;
+  }
+  mode_index = machine_mode_item->choice_ints[machine_mode_item->value];
+  if (mode_index < 0 || mode_index >= machine->num_modes) {
+    return NULL;
+  }
+  return &machine->modes[mode_index];
+}
+
+static void machine_populate_standards(BMC64VideoStandard preferred) {
+  const struct bmx_machine *machine = machine_selected_machine();
+  int choice;
+  int i;
+
+  machine_reset_choices(machine_standard_item);
+  if (machine != NULL) {
+    for (i = 0; i < machine->num_modes; ++i) {
+      const struct bmx_video_mode *mode = machine->modes[i].video_mode;
+      machine_add_choice(machine_standard_item,
+                         bmx_video_standard_name(mode->standard),
+                         mode->standard);
+    }
+  }
+  choice = machine_choice_index(machine_standard_item, preferred);
+  machine_standard_item->value = choice >= 0 ? choice : 0;
+  machine_standard_item->disabled = machine_standard_item->num_choices < 2;
+}
+
+static void machine_populate_outputs(BMC64VideoOut preferred) {
+  const struct bmx_machine *machine = machine_selected_machine();
+  BMC64VideoStandard standard = machine_selected_standard();
+  int choice;
+  int i;
+
+  machine_reset_choices(machine_output_item);
+  if (machine != NULL) {
+    for (i = 0; i < machine->num_modes; ++i) {
+      const struct bmx_video_mode *mode = machine->modes[i].video_mode;
+      if (mode->standard == standard) {
+        machine_add_choice(machine_output_item,
+                           bmx_video_output_name(mode->output), mode->output);
+      }
+    }
+  }
+  choice = machine_choice_index(machine_output_item, preferred);
+  machine_output_item->value = choice >= 0 ? choice : 0;
+  machine_output_item->disabled = machine_output_item->num_choices < 2;
+}
+
+static void machine_mode_label(char *label, size_t label_size,
+                               const struct bmx_video_mode *mode) {
+  snprintf(label, label_size, "%s%s",
+           mode->experimental ? "EXPERIMENTAL " : "", mode->label);
+}
+
+static void machine_populate_modes(const char *preferred_mode_id,
+                                   int preferred_index) {
+  const struct bmx_machine *machine = machine_selected_machine();
+  BMC64VideoStandard standard = machine_selected_standard();
+  BMC64VideoOut output = machine_selected_output();
+  int preferred_choice = -1;
+  int i;
+
+  machine_reset_choices(machine_mode_item);
+  snprintf(machine_mode_item->name, sizeof machine_mode_item->name, "%s Mode",
+           bmx_video_output_name(output));
+  if (machine == NULL) {
+    machine_mode_item->disabled = 1;
+    return;
+  }
+
+  for (i = 0; i < machine->num_modes && i < MAX_CHOICES; ++i) {
+    const struct bmx_video_mode *mode = machine->modes[i].video_mode;
+    char label[MAX_MENU_STR];
+
+    if (mode->standard != standard || mode->output != output) {
+      continue;
+    }
+    machine_mode_label(label, sizeof label, mode);
+    machine_add_choice(machine_mode_item, label, i);
+    if (preferred_mode_id != NULL &&
+        strcmp(machine->modes[i].mode_id, preferred_mode_id) == 0) {
+      preferred_choice = machine_mode_item->num_choices - 1;
+    }
+  }
+  if (preferred_choice < 0 && preferred_index >= 0 &&
+      preferred_index < machine_mode_item->num_choices) {
+    preferred_choice = preferred_index;
+  }
+  machine_mode_item->value = preferred_choice >= 0 ? preferred_choice : 0;
+  machine_mode_item->disabled = machine_mode_item->num_choices < 2;
+  if (machine_mode_item->num_choices > 0) {
+    snprintf(machine_preferred_mode_id, sizeof machine_preferred_mode_id, "%s",
+             machine->modes[machine_mode_item->choice_ints[
+                 machine_mode_item->value]].mode_id);
+  }
+}
+
+static int machine_change_pending(void) {
+  const struct bmx_machine_mode *selected = machine_selected_mode();
+
+  if (selected == NULL) {
+    return 0;
+  }
+  if (machine_selected_emulator() != machine_active_emulator) {
+    return 1;
+  }
+  return machine_active_mode == NULL ||
+         strcmp(selected->mode_id, machine_active_mode->mode_id) != 0;
+}
+
+static void machine_target_description(char *message, size_t message_size) {
+  const struct bmx_machine_mode *selected = machine_selected_mode();
+
+  if (selected == NULL) {
+    snprintf(message, message_size, "the selected machine profile");
+    return;
+  }
+  snprintf(message, message_size, "%s / %s / %s / %s",
+           machine_emulator_name(machine_selected_emulator()),
+           bmx_video_standard_name(selected->video_mode->standard),
+           bmx_video_output_name(selected->video_mode->output),
+           selected->video_mode->label);
+}
+
+static void machine_selection_changed(struct menu_item *item) {
+  BMC64VideoStandard standard = machine_selected_standard();
+  BMC64VideoOut output = machine_selected_output();
+  int mode_index = machine_mode_item == NULL ? 0 : machine_mode_item->value;
+  const char *preferred_mode_id = machine_preferred_mode_id[0] == '\0'
+                                      ? NULL
+                                      : machine_preferred_mode_id;
+
+  switch (item->id) {
+    case MENU_MACHINE_EMULATOR:
+      machine_populate_standards(standard);
+      machine_populate_outputs(output);
+      machine_populate_modes(preferred_mode_id, mode_index);
+      break;
+    case MENU_MACHINE_VIDEO_STANDARD:
+      machine_populate_outputs(output);
+      machine_populate_modes(preferred_mode_id, mode_index);
+      break;
+    case MENU_MACHINE_VIDEO_OUTPUT:
+      machine_populate_modes(preferred_mode_id, mode_index);
+      break;
+    case MENU_MACHINE_VIDEO_MODE: {
+      const struct bmx_machine_mode *selected = machine_selected_mode();
+      if (selected != NULL) {
+        snprintf(machine_preferred_mode_id, sizeof machine_preferred_mode_id,
+                 "%s", selected->mode_id);
+      }
+      break;
+    }
+    default:
+      break;
+  }
 }
 
 static void menu_build_machine_switch(struct menu_item* parent) {
-  struct menu_item* holder = ui_menu_add_folder(parent, "Switch");
+  MachineEmulator emulator = current_machine_emulator();
+  const struct bmx_machine *active_machine;
+  char active_mode_id[BMX_MODE_ID_LEN];
 
-  struct menu_item* vic20_r = NULL;
-  struct menu_item* c64_r = NULL;
-  struct menu_item* c128_r = NULL;
-  struct menu_item* plus4_r = NULL;
-  struct menu_item* pet_r = NULL;
-
-  struct machine_entry* head;
-  load_machines(&head);
-
-  struct machine_entry* ptr = head;
-  struct menu_item* item;
-  while (ptr) {
-    switch (ptr->class) {
-      case BMC64_MACHINE_CLASS_VIC20:
-         if (!vic20_r) vic20_r = ui_menu_add_folder(holder, "VIC20");
-         item = ui_menu_add_button(MENU_SWITCH_MACHINE, vic20_r, ptr->desc);
-         break;
-      case BMC64_MACHINE_CLASS_C64:
-         if (!c64_r) c64_r = ui_menu_add_folder(holder, "C64");
-         item = ui_menu_add_button(MENU_SWITCH_MACHINE, c64_r, ptr->desc);
-         break;
-      case BMC64_MACHINE_CLASS_C128:
-         if (!c128_r) c128_r = ui_menu_add_folder(holder, "C128");
-         item = ui_menu_add_button(MENU_SWITCH_MACHINE, c128_r, ptr->desc);
-         break;
-      case BMC64_MACHINE_CLASS_PLUS4:
-         if (!plus4_r) plus4_r = ui_menu_add_folder(holder, "Plus/4");
-         item = ui_menu_add_button(MENU_SWITCH_MACHINE, plus4_r, ptr->desc);
-         break;
-      case BMC64_MACHINE_CLASS_PLUS4EMU:
-         if (circle_get_model() >= 3) {
-            if (!plus4_r) plus4_r = ui_menu_add_folder(holder, "Plus/4");
-            item = ui_menu_add_button(MENU_SWITCH_MACHINE, plus4_r, ptr->desc);
-         } else {
-            item = NULL;
-         }
-         break;
-      case BMC64_MACHINE_CLASS_PET:
-         if (!pet_r) pet_r = ui_menu_add_folder(holder, "PET");
-         item = ui_menu_add_button(MENU_SWITCH_MACHINE, pet_r, ptr->desc);
-         break;
-      default:
-         item = NULL;
-         break;
-    }
-
-    if (item) {
-       item->value = ptr->id;
-    }
-
-    ptr=ptr->next;
+  free_machine_config(machine_config);
+  machine_config = NULL;
+  machine_active_mode = NULL;
+  machine_active_emulator = MACHINE_EMULATOR_UNKNOWN;
+  machine_emulator_item = NULL;
+  machine_standard_item = NULL;
+  machine_output_item = NULL;
+  machine_mode_item = NULL;
+  if (load_machine_config(&machine_config) != 0 || machine_config == NULL) {
+    ui_menu_add_button(MENU_TEXT, parent, "Invalid machines.ini");
+    return;
   }
 
-  free_machines(head);
+  machine_emulator_item = ui_menu_add_multiple_choice(
+      MENU_MACHINE_EMULATOR, parent, "Emulator");
+  machine_standard_item = ui_menu_add_multiple_choice(
+      MENU_MACHINE_VIDEO_STANDARD, parent, "Video Standard");
+  machine_output_item = ui_menu_add_multiple_choice(
+      MENU_MACHINE_VIDEO_OUTPUT, parent, "Video Output");
+  machine_mode_item = ui_menu_add_multiple_choice(
+      MENU_MACHINE_VIDEO_MODE, parent, "HDMI Mode");
+
+  machine_populate_emulators(emulator);
+  active_machine = bmx_machine_by_class(machine_config, emux_machine_class);
+  active_mode_id[0] = '\0';
+  switch_read_active_video_mode(active_mode_id, sizeof active_mode_id);
+  machine_active_mode = bmx_machine_mode_by_id(active_machine, active_mode_id);
+  if (machine_active_mode == NULL) {
+    machine_active_mode = bmx_machine_default_mode(active_machine);
+  }
+  machine_preferred_mode_id[0] = '\0';
+  machine_populate_standards(
+      machine_active_mode == NULL
+          ? BMC64_VIDEO_STANDARD_UNKNOWN
+          : machine_active_mode->video_mode->standard);
+  machine_populate_outputs(machine_active_mode == NULL
+                               ? BMC64_VIDEO_OUT_UNKNOWN
+                               : machine_active_mode->video_mode->output);
+  machine_populate_modes(
+      machine_active_mode == NULL ? NULL : machine_active_mode->mode_id, 0);
+
+  machine_active_emulator = emulator;
 }
 
 struct menu_item* add_joyport_options(struct menu_item* parent, int port) {
@@ -4421,6 +5571,32 @@ static const struct drive_menu_spec drive_menu_specs[] = {
    MENU_IECDIR_11, MENU_DRIVE_CHANGE_MODEL_11},
 };
 
+static void build_default_disk_menu(struct menu_item *drive_parent) {
+  struct menu_item *parent = ui_menu_add_folder(drive_parent, "Default disk");
+
+  default_disk_image_item = ui_menu_add_button_with_value(
+      MENU_DEFAULT_DISK_IMAGE, parent, "Disk image", 0,
+      default_disk_image, menu_basename(default_disk_image));
+  default_disk_image_item->str_value[MAX_STR_VAL_LEN - 1] = '\0';
+  default_disk_image_item->displayed_value[MAX_DSP_VAL_LEN - 1] = '\0';
+  default_disk_image_item->prefer_str = 1;
+
+  default_disk_drive_item = ui_menu_add_multiple_choice(
+      MENU_DEFAULT_DISK_DRIVE, parent, "Drive");
+  default_disk_drive_item->num_choices = 5;
+  strcpy(default_disk_drive_item->choices[0], "None");
+  default_disk_drive_item->choice_ints[0] = DEFAULT_DISK_DRIVE_NONE;
+  strcpy(default_disk_drive_item->choices[1], "8");
+  default_disk_drive_item->choice_ints[1] = 8;
+  strcpy(default_disk_drive_item->choices[2], "9");
+  default_disk_drive_item->choice_ints[2] = 9;
+  strcpy(default_disk_drive_item->choices[3], "10");
+  default_disk_drive_item->choice_ints[3] = 10;
+  strcpy(default_disk_drive_item->choices[4], "11");
+  default_disk_drive_item->choice_ints[4] = 11;
+  default_disk_set_drive(default_disk_drive);
+}
+
 static void build_drive_menu(struct menu_item *drive_parent,
                              const struct drive_menu_spec *spec) {
   char name[16];
@@ -4456,6 +5632,10 @@ void build_menu(struct menu_item *root) {
   int j;
   int k;
   int tmp;
+
+  default_disk_image_item = NULL;
+  default_disk_drive_item = NULL;
+  default_disk_reset();
 
   for (int k = 0; k < MAX_USB_DEVICES; k++) {
      sprintf (usb_btn_name[k], "usb_btn_%d", k);
@@ -4494,6 +5674,10 @@ void build_menu(struct menu_item *root) {
   case BMC64_MACHINE_CLASS_C64:
     strcat(machine_info_txt,"C64 ");
     strcpy(machine_sub_dir, "/C64");
+    break;
+  case BMC64_MACHINE_CLASS_SCPU64:
+    strcat(machine_info_txt,"SCPU64 ");
+    strcpy(machine_sub_dir, "/SCPU64");
     break;
   case BMC64_MACHINE_CLASS_C128:
     strcat(machine_info_txt,"C128 ");
@@ -4601,8 +5785,8 @@ void build_menu(struct menu_item *root) {
   }
 
   machine_parent = ui_menu_add_folder(root, "Machine");
-    emux_add_machine_options(machine_parent);
     menu_build_machine_switch(machine_parent);
+    emux_add_machine_options(machine_parent);
 
   drive_parent = ui_menu_add_folder(root, "Drives");
     // (-1) Options applicable to all drives
@@ -4616,6 +5800,8 @@ void build_menu(struct menu_item *root) {
     for (i = 1; i < num_drive_specs; i++) {
       build_drive_menu(drive_parent, &drive_menu_specs[i]);
     }
+
+    build_default_disk_menu(drive_parent);
   }
 
   if (emux_machine_class != BMC64_MACHINE_CLASS_PLUS4EMU) {
@@ -4942,6 +6128,17 @@ void build_menu(struct menu_item *root) {
   volume_item = ui_menu_add_range(MENU_VOLUME, parent,
       "Volume ", 0, 100, 1, 100);
 
+  sound_output_priority_item = child =
+      ui_menu_add_multiple_choice(MENU_SOUND_OUTPUT_PRIORITY, parent,
+                                  "Output Priority");
+  child->num_choices = 2;
+  child->value = circle_get_sound_output_priority() ==
+                 SOUND_OUTPUT_PRIORITY_USB_HDMI ? 1 : 0;
+  strcpy(child->choices[0], "HDMI, USB");
+  child->choice_ints[0] = SOUND_OUTPUT_PRIORITY_HDMI_USB;
+  strcpy(child->choices[1], "USB, HDMI");
+  child->choice_ints[1] = SOUND_OUTPUT_PRIORITY_USB_HDMI;
+
   emux_add_sound_options(parent);
 
   parent = ui_menu_add_folder(root, "Keyboard");
@@ -5094,6 +6291,17 @@ void build_menu(struct menu_item *root) {
   strcpy(statusbar_item->choices[OVERLAY_ALWAYS], "Always");
   strcpy(statusbar_item->choices[OVERLAY_ON_ACTIVITY], "On Activity");
 
+  diagnostics_overlay_item =
+      ui_menu_add_multiple_choice(MENU_DIAGNOSTICS_OVERLAY, parent,
+                                  "Diagnostics Overlay");
+  diagnostics_overlay_item->num_choices = 3;
+  diagnostics_overlay_item->value = DIAGNOSTICS_OVERLAY_OFF;
+  strcpy(diagnostics_overlay_item->choices[DIAGNOSTICS_OVERLAY_OFF], "Off");
+  strcpy(diagnostics_overlay_item->choices[DIAGNOSTICS_OVERLAY_COMPACT],
+         "Compact");
+  strcpy(diagnostics_overlay_item->choices[DIAGNOSTICS_OVERLAY_EXTENDED],
+         "Extended");
+
   statusbar_padding_item =
       ui_menu_add_range(MENU_OVERLAY_PADDING, parent, "Status Bar Padding",
           0, 64, 1, 0);
@@ -5132,6 +6340,17 @@ void build_menu(struct menu_item *root) {
 
   ui_menu_add_button(MENU_SAVE_SETTINGS, root, "Save settings");
 
+  ui_menu_add_divider(root);
+
+  parent = ui_menu_add_folder(root, "System");
+  ui_menu_add_button(MENU_SYSTEM_UPDATE, parent, "Update...");
+  if (emux_update_draft_test_available() > 0) {
+    ui_menu_add_button(MENU_SYSTEM_UPDATE_DRAFT, parent,
+                       "Test prepared draft...");
+  }
+  ui_menu_add_button(MENU_SYSTEM_REBOOT, parent, "Reboot...");
+  ui_menu_add_button(MENU_SYSTEM_POWER_OFF, parent, "Power Off...");
+
   ui_set_on_value_changed_callback(menu_value_changed);
   ui_set_on_text_field_return_callback(menu_text_field_return);
 
@@ -5150,6 +6369,10 @@ void build_menu(struct menu_item *root) {
   }
 
   // Apply shader params
+  if (!allow_shader_autostart()) {
+    s_enable_shader_item->value = 0;
+    emux_set_int(Setting_VideoFilter, MENU_VIDEO_FILTER_NONE);
+  }
   sanity_check_shader_params(s_enable_shader_item->id);
   circle_realloc_fbl(FB_LAYER_VIC, allow_shader() ? s_enable_shader_item->value : 0);
   handle_shader_param_change();
@@ -5157,6 +6380,9 @@ void build_menu(struct menu_item *root) {
   set_current_dir_names();
 
   circle_set_volume(volume_item->value);
+  circle_set_sound_output_priority(
+      sound_output_priority_item->choice_ints[
+          sound_output_priority_item->value]);
 
   emux_change_palette(0, palette_item[0]->value);
   if (emux_machine_class == BMC64_MACHINE_CLASS_C128) {
@@ -5186,6 +6412,7 @@ void build_menu(struct menu_item *root) {
   overlay_init(statusbar_padding_item->value,
                c40_80_column_item->value,
                vkbd_transparency_item->value);
+  overlay_diagnostics_set_mode(diagnostics_overlay_item->value);
 
   emux_set_joy_pot_x(0, pot_x_high_value);
   emux_set_joy_pot_x(1, pot_x_high_value);
@@ -5232,6 +6459,14 @@ void menu_about_to_activate() {
 // Stuff to do before going back to emulator
 void menu_about_to_deactivate() {}
 
+static void show_files_from_quick_func(DirType dir_type, FileFilter filter,
+                                       int menu_id) {
+  if (!ui_enabled) {
+    ui_pop_all_and_toggle();
+  }
+  show_files(dir_type, filter, menu_id, 0);
+}
+
 // These are called on the main loop
 void menu_quick_func(int button_assignment) {
   int value;
@@ -5274,6 +6509,43 @@ void menu_quick_func(int button_assignment) {
     break;
   case BTN_ASSIGN_CART_MENU:
     emux_show_cart_osd_menu();
+    break;
+  case BTN_ASSIGN_ATTACH_TAPE:
+    show_files_from_quick_func(DIR_TAPES, FILTER_TAPE, MENU_TAPE_FILE);
+    break;
+  case BTN_ASSIGN_ATTACH_CART:
+    switch (emux_machine_class) {
+    case BMC64_MACHINE_CLASS_C64:
+    case BMC64_MACHINE_CLASS_SCPU64:
+    case BMC64_MACHINE_CLASS_C128:
+      show_files_from_quick_func(DIR_CARTS, FILTER_CART, MENU_C64_CART_FILE);
+      break;
+    case BMC64_MACHINE_CLASS_VIC20:
+      show_files_from_quick_func(DIR_CARTS, FILTER_NONE,
+                                 MENU_VIC20_CART_DETECT_FILE);
+      break;
+    case BMC64_MACHINE_CLASS_PLUS4:
+      show_files_from_quick_func(DIR_CARTS, FILTER_CART, MENU_PLUS4_CART_FILE);
+      break;
+    default:
+      break;
+    }
+    break;
+  case BTN_ASSIGN_ATTACH_DISK_8:
+    unit = 8;
+    show_files_from_quick_func(DIR_DISKS, FILTER_DISK, MENU_DISK_FILE);
+    break;
+  case BTN_ASSIGN_ATTACH_DISK_9:
+    unit = 9;
+    show_files_from_quick_func(DIR_DISKS, FILTER_DISK, MENU_DISK_FILE);
+    break;
+  case BTN_ASSIGN_ATTACH_DISK_10:
+    unit = 10;
+    show_files_from_quick_func(DIR_DISKS, FILTER_DISK, MENU_DISK_FILE);
+    break;
+  case BTN_ASSIGN_ATTACH_DISK_11:
+    unit = 11;
+    show_files_from_quick_func(DIR_DISKS, FILTER_DISK, MENU_DISK_FILE);
     break;
   case BTN_ASSIGN_RESET_MENU:
     show_reset_osd_menu();
@@ -5402,6 +6674,18 @@ const char* function_to_string(int button_func) {
        return "Virtual Keyboard";
     case BTN_ASSIGN_FLUSH_DISK:
        return "Flush Disks";
+    case BTN_ASSIGN_ATTACH_TAPE:
+       return "Attach Tape";
+    case BTN_ASSIGN_ATTACH_CART:
+       return "Attach Cart";
+    case BTN_ASSIGN_ATTACH_DISK_8:
+       return "Attach Drive 8";
+    case BTN_ASSIGN_ATTACH_DISK_9:
+       return "Attach Drive 9";
+    case BTN_ASSIGN_ATTACH_DISK_10:
+       return "Attach Drive 10";
+    case BTN_ASSIGN_ATTACH_DISK_11:
+       return "Attach Drive 11";
     default:
        return "Unknown";
   }

@@ -83,12 +83,14 @@ unsigned ClampRs232Baud(unsigned baud, TBmxRs232Interface interface) {
 }
 
 bool SupportsUserportRs232(MachineId id) {
-  return id == MachineId::C64 || id == MachineId::C128 ||
+  return id == MachineId::C64 || id == MachineId::SCPU64 ||
+         id == MachineId::C128 ||
          id == MachineId::VIC20;
 }
 
 bool SupportsAciaRs232(MachineId id) {
-  return id == MachineId::C64 || id == MachineId::C128 ||
+  return id == MachineId::C64 || id == MachineId::SCPU64 ||
+         id == MachineId::C128 ||
          id == MachineId::VIC20 || id == MachineId::PLUS4;
 }
 
@@ -118,6 +120,17 @@ void RunMainProgram(const char *timing_option,
     argv[argc++] = (char *)"3";
     argv[argc++] = (char *)"-poskeymap";
     argv[argc++] = (char *)Basename(machine.default_keymap);
+  }
+
+  if (machine.id == MachineId::SCPU64) {
+    argv[argc++] = (char *)"+drive8truedrive";
+    argv[argc++] = (char *)"+drive9truedrive";
+    argv[argc++] = (char *)"+drive10truedrive";
+    argv[argc++] = (char *)"+drive11truedrive";
+    argv[argc++] = (char *)"-trapdevice8";
+    argv[argc++] = (char *)"-trapdevice9";
+    argv[argc++] = (char *)"-trapdevice10";
+    argv[argc++] = (char *)"-trapdevice11";
   }
 
   bool hayes_mode = options->GetRs232NetMode() == BMX_RS232_MODE_HAYES;
@@ -168,7 +181,8 @@ void RunMainProgram(const char *timing_option,
     } else if (!wants_userport && SupportsAciaRs232(machine.id)) {
       argv[argc++] = (char *)"-myaciadev";
       argv[argc++] = (char *)"0";
-      if (machine.id == MachineId::C64 || machine.id == MachineId::C128 ||
+      if (machine.id == MachineId::C64 || machine.id == MachineId::SCPU64 ||
+          machine.id == MachineId::C128 ||
           machine.id == MachineId::VIC20) {
         argv[argc++] = (char *)"-acia1base";
         argv[argc++] = (char *)Rs232AciaBase(interface);

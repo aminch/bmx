@@ -42,7 +42,7 @@ int custom_gpio_pins[NUM_GPIO_PINS] = {
     5, 20, 19, 16, 13, 6, 12, 26, 8, 25, 24,
     18, 23, 27, 17, 22, 4, 7, 21, 2, 3, 9, 10 };
 
-#define NUM_GPIO_BINDINGS 38
+#define NUM_GPIO_BINDINGS 44
 
 // Button function and bank (if applicable)
 static int menu_items_list[NUM_GPIO_BINDINGS][2] = {
@@ -84,6 +84,12 @@ static int menu_items_list[NUM_GPIO_BINDINGS][2] = {
     { BTN_ASSIGN_40_80_COLUMN, 0 },
     { BTN_ASSIGN_VKBD_TOGGLE, 0 },
     { BTN_ASSIGN_FLUSH_DISK, 0 },
+    { BTN_ASSIGN_ATTACH_TAPE, 0 },
+    { BTN_ASSIGN_ATTACH_CART, 0 },
+    { BTN_ASSIGN_ATTACH_DISK_8, 0 },
+    { BTN_ASSIGN_ATTACH_DISK_9, 0 },
+    { BTN_ASSIGN_ATTACH_DISK_10, 0 },
+    { BTN_ASSIGN_ATTACH_DISK_11, 0 },
 };
 
 static void menu_value_changed(struct menu_item *item) {

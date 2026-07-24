@@ -53,6 +53,7 @@ const uint8_t ascii_to_petscii[256] = {
     0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f,
     0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x5e};
 int emux_machine_class = BMC64_MACHINE_CLASS_UNKNOWN;
+BMC64C64Core emux_c64_core = BMC64_C64_CORE_UNKNOWN;
 int vic_showing;
 int vdc_showing;
 int vic_enabled = 1;
@@ -129,7 +130,8 @@ void emux_ensure_video(void) {
      if (vkbd_enabled && !vkbd_showing) {
         vkbd_showing = 1;
      }
-     if (statusbar_showing || vkbd_showing) {
+     if ((statusbar_showing || vkbd_showing) &&
+         !overlay_status_layer_suppressed()) {
         circle_show_fbl(FB_LAYER_STATUS);
      }
   } else if ((!statusbar_enabled && statusbar_showing) ||
@@ -142,6 +144,14 @@ void emux_ensure_video(void) {
      }
      if (!statusbar_showing && !vkbd_showing) {
         circle_hide_fbl(FB_LAYER_STATUS);
+     }
+  }
+
+  if (statusbar_showing || vkbd_showing || diagnostics_showing) {
+     if (overlay_status_layer_suppressed()) {
+        circle_hide_fbl(FB_LAYER_STATUS);
+     } else {
+        circle_show_fbl(FB_LAYER_STATUS);
      }
   }
 
@@ -301,7 +311,7 @@ int is_composite() {
       timing == MACHINE_TIMING_PAL_COMPOSITE;
 }
 
-// Disable shader for composite or models > 3
+// Disable shader for composite or models newer than Pi3.
 int allow_shader() {
   return circle_get_model() <= 3 && !is_composite();
 }

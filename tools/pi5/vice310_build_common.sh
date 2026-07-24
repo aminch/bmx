@@ -14,6 +14,7 @@ fi
 . "$SRC_DIR/tools/lib/build_paths.sh"
 . "$SRC_DIR/tools/lib/circle_patches.sh"
 . "$SRC_DIR/tools/lib/circle_source_archive.sh"
+. "$SRC_DIR/tools/lib/mbedtls_source_archive.sh"
 
 TOOLS_BIN="$SRC_DIR/tools/autotools-stubs/bin"
 CIRCLE_STDLIB_HOME="$BMC64_BUILD_ROOT/pi5/circle-stdlib"
@@ -70,6 +71,7 @@ ensure_circle_stdlib() {
     "$CIRCLE_STDLIB_SOURCE_SHA256" \
     "$CIRCLE_STDLIB_HOME"
   apply_circle_stdlib_patches "$CIRCLE_STDLIB_HOME" "$CIRCLE_STDLIB_PATCH_DIR"
+  circle_stdlib_install_pinned_mbedtls "$SRC_DIR" "$CIRCLE_STDLIB_HOME"
   record_circle_stdlib_patchset "$CIRCLE_STDLIB_HOME" "$patchset_hash"
 }
 
@@ -104,11 +106,17 @@ configure_circle_profile_flags() {
 }
 
 build_circle_stdlib() {
+  local circle_profile_options=()
+
+  if [ "${BMC64_BUILD_PROFILE:-release}" = release ]; then
+    circle_profile_options+=(--option NDEBUG)
+  fi
   cd "$CIRCLE_STDLIB_HOME"
   make mrproper >/dev/null 2>&1 || true
   ./configure --raspberrypi=5 --aarch64 --kernel-max-size 48 \
     --option ARM_ALLOW_MULTI_CORE --option USE_USB_SOF_INTR \
-    --prefix aarch64-none-elf-
+    --opt-tls \
+    --prefix aarch64-none-elf- "${circle_profile_options[@]}"
   configure_circle_profile_flags
   make -j"$(nproc)"
   make -C libs/circle/addon/fatfs clean
@@ -127,21 +135,26 @@ build_circle_stdlib() {
 
 build_common() {
   make -C "$SRC_DIR/third_party/common" clean CIRCLE_STDLIB_HOME="$CIRCLE_STDLIB_HOME" \
-    BMC64_BUILD_PROFILE="${BMC64_BUILD_PROFILE:-release}"
+    BMC64_BUILD_PROFILE="${BMC64_BUILD_PROFILE:-release}" \
+    BMC64_MENU_LOG_LEVEL="${BMC64_MENU_LOG_LEVEL:-}"
   (
     cd "$SRC_DIR/third_party/common"
     BOARD=pi5 CIRCLE_STDLIB_HOME="$CIRCLE_STDLIB_HOME" \
-      BMC64_BUILD_PROFILE="${BMC64_BUILD_PROFILE:-release}" make
+      BMC64_BUILD_PROFILE="${BMC64_BUILD_PROFILE:-release}" \
+      BMC64_MENU_LOG_LEVEL="${BMC64_MENU_LOG_LEVEL:-}" make
   )
 }
 
 set_vice310_make_args() {
   local vice_cppflags vice_cflags vice_cxxflags vice_ldflags
   local debug_define=""
+  local release_define=""
   local diag_defines=""
 
   if [ "${BMC64_BUILD_PROFILE:-release}" = debug ]; then
     debug_define=" -DBMC64_DEBUG_PROFILE"
+  else
+    release_define=" -DNDEBUG"
   fi
   if [ -n "${BMC64_RS232_LOG_LEVEL:-}" ]; then
     diag_defines="$diag_defines -DBMC64_RS232_LOG_LEVEL=$BMC64_RS232_LOG_LEVEL"
@@ -156,9 +169,9 @@ set_vice310_make_args() {
     diag_defines="$diag_defines -DBMC64_NET_LOG_LEVEL=$BMC64_NET_LOG_LEVEL"
   fi
 
-  vice_cppflags="-DRASPI_COMPILE$debug_define$diag_defines -I$VICE_SRC -I$VICE_SRC/arch/shared -I$VICE_SRC/arch/raspi"
-  vice_cflags="-O3 -std=gnu11 -ffreestanding -nostdlib -fno-exceptions -mcpu=cortex-a76 -mlittle-endian$debug_define$diag_defines -I$VICE_SRC -I$SRC_DIR/src -I$SRC_DIR -I$SRC_DIR/third_party/common -I$NEWLIBDIR/include -I$CIRCLE_STDLIB_HOME/include -I$CIRCLE_STDLIB_HOME/libs/circle/addon -I$CIRCLE_STDLIB_HOME/libs/circle/addon/fatfs"
-  vice_cxxflags="-O3 -ffreestanding -nostdlib -fno-exceptions -mcpu=cortex-a76 -mlittle-endian -std=c++11 -fno-rtti -nostdinc++$debug_define$diag_defines -I$VICE_SRC -I$SRC_DIR/src -I$SRC_DIR -I$SRC_DIR/third_party/common -I$NEWLIBDIR/include -I$CIRCLE_STDLIB_HOME/include -I$CIRCLE_STDLIB_HOME/libs/circle/addon -I$CIRCLE_STDLIB_HOME/libs/circle/addon/fatfs"
+  vice_cppflags="-DRASPI_COMPILE$debug_define$release_define$diag_defines -I$VICE_SRC -I$VICE_SRC/arch/shared -I$VICE_SRC/arch/raspi"
+  vice_cflags="-O3 -std=gnu11 -ffreestanding -nostdlib -fno-exceptions -mcpu=cortex-a76 -mlittle-endian$debug_define$release_define$diag_defines -I$VICE_SRC -I$SRC_DIR/src -I$SRC_DIR -I$SRC_DIR/third_party/common -I$NEWLIBDIR/include -I$CIRCLE_STDLIB_HOME/include -I$CIRCLE_STDLIB_HOME/libs/circle/addon -I$CIRCLE_STDLIB_HOME/libs/circle/addon/fatfs"
+  vice_cxxflags="-O3 -ffreestanding -nostdlib -fno-exceptions -fcheck-new -mcpu=cortex-a76 -mlittle-endian -std=c++11 -fno-rtti -nostdinc++$debug_define$release_define$diag_defines -I$VICE_SRC -I$SRC_DIR/src -I$SRC_DIR -I$SRC_DIR/third_party/common -I$NEWLIBDIR/include -I$CIRCLE_STDLIB_HOME/include -I$CIRCLE_STDLIB_HOME/libs/circle/addon -I$CIRCLE_STDLIB_HOME/libs/circle/addon/fatfs"
   vice_ldflags="-L$NEWLIBDIR/lib"
 
   vice_configure_args=(
@@ -234,8 +247,20 @@ configure_vice310() {
   find src -name '*.a' -delete
 }
 
+preserve_vice310_generated_monitor_parser() {
+  local monitor_dir="$VICE_SRC/monitor"
+
+  # A clean checkout can give mon_parse.y a newer timestamp than VICE's
+  # checked-in BYACC output. Do not silently replace it with output from the
+  # host's yacc implementation during a release build.
+  touch -r "$monitor_dir/mon_parse.y" \
+    "$monitor_dir/mon_parse.c" "$monitor_dir/mon_parse.h"
+}
+
 vice310_machine_config() {
   local machine="$1"
+
+  VICE310_VARIANT_ARCHIVES=()
 
   case "$machine" in
     c64)
@@ -246,6 +271,34 @@ vice310_machine_config() {
       VICE310_ARCH_LIB="libarch_c64.a"
       VICE310_IMAGE_SUFFIX="c64"
       VICE310_COPY_DEFAULT=1
+      VICE310_VARIANT_ARCHIVES=(
+        "$VICE_SRC/c64/libc64.a"
+        "$VICE_SRC/vicii/libvicii.a"
+        "$VICE_SRC/c64/libc64stubs.a"
+      )
+      ;;
+    c64sc)
+      VICE310_TARGET="x64sc"
+      VICE310_MAKEFILE="mk/machines/Makefile-C64SC-310"
+      VICE310_CLASS="RASPI_C64SC"
+      VICE310_ARCH_DIR="c64"
+      VICE310_ARCH_LIB="libarch_c64.a"
+      VICE310_IMAGE_SUFFIX="c64sc"
+      VICE310_COPY_DEFAULT=0
+      VICE310_VARIANT_ARCHIVES=(
+        "$VICE_SRC/c64/libc64sc.a"
+        "$VICE_SRC/viciisc/libviciisc.a"
+        "$VICE_SRC/c64/libc64scstubs.a"
+      )
+      ;;
+    scpu64)
+      VICE310_TARGET="xscpu64"
+      VICE310_MAKEFILE="mk/machines/Makefile-SCPU64-310"
+      VICE310_CLASS="RASPI_SCPU64"
+      VICE310_ARCH_DIR="c64"
+      VICE310_ARCH_LIB="libarch_c64.a"
+      VICE310_IMAGE_SUFFIX="scpu64"
+      VICE310_COPY_DEFAULT=0
       ;;
     c128)
       VICE310_TARGET="x128"
@@ -295,6 +348,9 @@ build_vice310_archives() {
   vice310_machine_config "$machine"
 
   cd "$VICE_DIR"
+  if [ "${#VICE310_VARIANT_ARCHIVES[@]}" -gt 0 ]; then
+    rm -f "${VICE310_VARIANT_ARCHIVES[@]}"
+  fi
   make -k "$VICE310_TARGET" "${vice_make_args[@]}" || true
   make -C src infocontrib.h "${vice_make_args[@]}"
   make -C src/resid libresid.a "${vice_make_args[@]}"
@@ -350,16 +406,18 @@ build_vice310_kernel() {
 build_vice310_machines() {
   local machine
 
-  if [ "$#" -eq 0 ]; then
-    set -- c64 c128 vic20 plus4 pet
-  fi
+  [ "$#" -gt 0 ] || {
+    echo "build_vice310_machines requires the sd-layout machine list" >&2
+    return 2
+  }
 
   ensure_toolchain
   ensure_circle_stdlib
   build_circle_stdlib
-  build_common
   set_vice310_make_args
   configure_vice310
+  preserve_vice310_generated_monitor_parser
+  build_common
 
   for machine in "$@"; do
     build_vice310_archives "$machine"

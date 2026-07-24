@@ -122,7 +122,10 @@ int c128ui_init(void) {
 int c64dtvui_init_early(void) { return 0; }
 int c64dtvui_init(void) { return 0; }
 int c64scui_init_early(void) { return 0; }
-int c64scui_init(void) { return 0; }
+int c64scui_init(void) {
+  ui_init_menu();
+  return 0;
+}
 int c64ui_init_early(void) { return 0; }
 int c64ui_init(void) {
   ui_init_menu();
@@ -151,7 +154,10 @@ int plus4ui_init(void) {
   return 0;
 }
 int scpu64ui_init_early(void) { return 0; }
-int scpu64ui_init(void) { return 0; }
+int scpu64ui_init(void) {
+  ui_init_menu();
+  return 0;
+}
 int ui_cmdline_options_init(void) { return 0; }
 int ui_extend_image_dialog(void) { return 0; }
 int ui_hotkeys_cmdline_options_init(void) { return 0; }

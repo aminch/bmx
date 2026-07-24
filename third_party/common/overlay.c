@@ -85,6 +85,9 @@ static int inset_y;
 
 uint8_t *overlay_buf;
 static int overlay_buf_pitch;
+static int overlay_height = OVERLAY_HEIGHT;
+static int overlay_display_height;
+static int overlay_padding;
 
 #define BG_COLOR 0
 #define FG_COLOR 1
@@ -96,8 +99,25 @@ static int overlay_buf_pitch;
 #define TRANSPARENT_COLOR 7
 #define VKBD_FG_COLOR 8
 #define VKBD_BG_COLOR 9
+#define DIAG_BG_COLOR 10
+#define DIAG_DIM_COLOR 11
 
-#define NUM_COLORS 11
+#define NUM_COLORS 12
+
+#define DIAG_MODE_OFF 0
+#define DIAG_MODE_COMPACT 1
+#define DIAG_MODE_EXTENDED 2
+
+#define DIAG_X 4
+#define DIAG_Y 4
+#define DIAG_W 520
+#define DIAG_PAD_Y 6
+#define DIAG_TEXT_H 8
+#define DIAG_LINE_STEP 12
+#define DIAG_PANEL_H(lines) \
+  (DIAG_PAD_Y * 2 + DIAG_TEXT_H + DIAG_LINE_STEP * ((lines) - 1))
+#define DIAG_COMPACT_H DIAG_PANEL_H(2)
+#define DIAG_H DIAG_PANEL_H(5)
 
 // Defines the first 8 overlay palette entries
 static uint32_t overlay_palette[NUM_COLORS] = {
@@ -111,6 +131,8 @@ static uint32_t overlay_palette[NUM_COLORS] = {
   ARGB(0x00, 0x00, 0x00, 0x00), // transparent
   ARGB(0xFF, 0xFF, 0xFF, 0xFF), // vkbd fg
   ARGB(0xFF, 0x30, 0x30, 0x30), // vkbd bg
+  ARGB(0xB0, 0x00, 0x00, 0x00), // diagnostics bg
+  ARGB(0xFF, 0x95, 0x95, 0x95), // diagnostics dim
 };
 
 // The index into the virtual keyboard of the cursor
@@ -131,11 +153,16 @@ int vkbd_cntrl_down;
 
 int statusbar_enabled;
 int statusbar_showing;
+int diagnostics_showing;
 
 static int last_c480_80_state;
 static char *template;
 
 int overlay_dirty;
+
+static int diagnostics_mode;
+static unsigned diagnostics_fps_milli;
+static unsigned diagnostics_core_busy_milli;
 
 static void draw_drive_status(int state, int *drive_led_color);
 static void draw_drive_led(int drive, unsigned int pwm1, unsigned int pwm2);
@@ -145,9 +172,139 @@ static void draw_tape_motor_status(int motor);
 static void draw_warp(int warp);
 static void draw_joyswap(int swap);
 
+static int screen_y_to_overlay_y(int y) {
+  if (overlay_display_height <= 0) {
+    return y;
+  }
+
+  return (y * overlay_height + overlay_display_height / 2) /
+         overlay_display_height;
+}
+
+static int statusbar_y(void) {
+  int y = overlay_height - STATUS_BAR_HEIGHT -
+          screen_y_to_overlay_y(overlay_padding);
+
+  return y < 0 ? 0 : y;
+}
+
+static void update_statusbar_position(void) {
+  inset_y = statusbar_y() + 1*SCALE_XY;
+}
+
+static void overlay_update_layer_visibility(void) {
+  if (!overlay_buf) {
+    return;
+  }
+
+  if ((statusbar_showing || vkbd_showing || diagnostics_showing) &&
+      !overlay_status_layer_suppressed()) {
+    circle_show_fbl(FB_LAYER_STATUS);
+  } else {
+    circle_hide_fbl(FB_LAYER_STATUS);
+  }
+}
+
+int overlay_status_layer_suppressed(void) {
+#if defined(RASPPI) && RASPPI == 4
+  return ui_enabled != 0;
+#else
+  return 0;
+#endif
+}
+
+static void clear_diagnostics(void) {
+  if (!overlay_buf) {
+    return;
+  }
+
+  ui_draw_rect_buf(DIAG_X, DIAG_Y, DIAG_W, DIAG_H,
+                   TRANSPARENT_COLOR, 1, overlay_buf, overlay_buf_pitch);
+  overlay_dirty = 1;
+}
+
+static unsigned hz_to_mhz(unsigned hz) {
+  return (hz + 500000) / 1000000;
+}
+
+static void draw_diagnostics(void) {
+  if (!overlay_buf || diagnostics_mode == DIAG_MODE_OFF) {
+    return;
+  }
+
+  struct bmx_diagnostics_snapshot snap;
+  char line[96];
+  int y = DIAG_Y + DIAG_PAD_Y;
+  int panel_h = diagnostics_mode == DIAG_MODE_COMPACT ? DIAG_COMPACT_H : DIAG_H;
+
+  circle_get_diagnostics(&snap);
+
+  ui_draw_rect_buf(DIAG_X, DIAG_Y, DIAG_W, DIAG_H,
+                   TRANSPARENT_COLOR, 1, overlay_buf, overlay_buf_pitch);
+  ui_draw_rect_buf(DIAG_X, DIAG_Y, DIAG_W, panel_h,
+                   DIAG_BG_COLOR, 1, overlay_buf, overlay_buf_pitch);
+
+  snprintf(line, sizeof(line),
+           "FPS %u.%03u/%u.%03u  ARM %uMHz  EMU %uHz",
+           diagnostics_fps_milli / 1000, diagnostics_fps_milli % 1000,
+           (unsigned)(emux_calculate_fps() * 1000.0) / 1000,
+           (unsigned)(emux_calculate_fps() * 1000.0) % 1000,
+           hz_to_mhz(snap.arm_clock_hz), snap.emu_cycles_per_sec);
+  ui_draw_text_buf(line, DIAG_X + 6, y, FG_COLOR, overlay_buf,
+                   overlay_buf_pitch, 1);
+  y += 12;
+
+  snprintf(line, sizeof(line),
+           "RAM %uMB  heap %uMB free  low %uMB  high %uMB  temp %uC",
+           snap.ram_total_kb / 1024, snap.heap_free_kb / 1024,
+           snap.heap_low_free_kb / 1024, snap.heap_high_free_kb / 1024,
+           snap.temperature_c);
+  ui_draw_text_buf(line, DIAG_X + 6, y, FG_COLOR, overlay_buf,
+                   overlay_buf_pitch, 1);
+
+  if (diagnostics_mode == DIAG_MODE_EXTENDED) {
+    y += 12;
+#if defined(RASPPI) && RASPPI == 4
+    snprintf(line, sizeof(line),
+             "Core load est: C0 emulator %u.%u%%",
+             diagnostics_core_busy_milli / 10,
+             diagnostics_core_busy_milli % 10);
+#else
+    snprintf(line, sizeof(line),
+             "Core load est: C0 IRQ  C1 emulator %u.%u%%",
+             diagnostics_core_busy_milli / 10,
+             diagnostics_core_busy_milli % 10);
+#endif
+    ui_draw_text_buf(line, DIAG_X + 6, y, FG_COLOR, overlay_buf,
+                     overlay_buf_pitch, 1);
+    y += 12;
+
+#if defined(RASPPI) && RASPPI == 4
+    ui_draw_text_buf("C1-C3 unavailable in the Pi4 32-bit build.",
+                     DIAG_X + 6, y, DIAG_DIM_COLOR, overlay_buf,
+                     overlay_buf_pitch, 1);
+#else
+    ui_draw_text_buf("C2 SID/idle  C3 idle",
+                     DIAG_X + 6, y, DIAG_DIM_COLOR, overlay_buf,
+                     overlay_buf_pitch, 1);
+#endif
+    y += 12;
+
+    snprintf(line, sizeof(line),
+             "Throttle clock %uMHz",
+             hz_to_mhz(snap.throttle_clock_hz));
+    ui_draw_text_buf(line, DIAG_X + 6, y, DIAG_DIM_COLOR, overlay_buf,
+                     overlay_buf_pitch, 1);
+  }
+
+  overlay_dirty = 1;
+}
+
 static void draw_statusbar() {
   // Now draw the bg for the status bar
-  ui_draw_rect_buf(0, OVERLAY_HEIGHT - STATUS_BAR_HEIGHT,
+  update_statusbar_position();
+
+  ui_draw_rect_buf(0, statusbar_y(),
                    OVERLAY_WIDTH, STATUS_BAR_HEIGHT,
                    BG_COLOR, 1, overlay_buf, overlay_buf_pitch);
 
@@ -180,7 +337,7 @@ static void draw_statusbar() {
 }
 
 static void clear_statusbar() {
-  ui_draw_rect_buf(0, OVERLAY_HEIGHT - STATUS_BAR_HEIGHT,
+  ui_draw_rect_buf(0, statusbar_y(),
                    OVERLAY_WIDTH, STATUS_BAR_HEIGHT,
                    TRANSPARENT_COLOR, 1, overlay_buf, overlay_buf_pitch);
   overlay_dirty = 1;
@@ -188,20 +345,50 @@ static void clear_statusbar() {
 
 // Create a new overlay buffer
 uint8_t *overlay_init(int padding, int c40_80_state, int vkbd_transparency) {
+  int display_w = 0;
+  int display_h = 0;
+  int fb_w = 0;
+  int fb_h = 0;
+  int src_w = 0;
+  int src_h = 0;
+  int dst_w = 0;
+  int dst_h = 0;
+
   last_c480_80_state = c40_80_state;
+  overlay_padding = padding;
+  overlay_height = OVERLAY_HEIGHT;
   circle_alloc_fbl(FB_LAYER_STATUS, 0 /* indexed */,
-                   &overlay_buf, OVERLAY_WIDTH, OVERLAY_HEIGHT,
+                   &overlay_buf, OVERLAY_WIDTH, overlay_height,
                    &overlay_buf_pitch);
+  circle_get_fbl_dimensions(FB_LAYER_STATUS, &display_w, &display_h,
+                            &fb_w, &fb_h, &src_w, &src_h, &dst_w, &dst_h);
+  if (display_w > 0 && display_h > 0) {
+    overlay_display_height = display_h;
+    overlay_height = (OVERLAY_WIDTH * display_h + display_w - 1) / display_w;
+    if (overlay_height < OVERLAY_HEIGHT) {
+      overlay_height = OVERLAY_HEIGHT;
+    }
+
+    if (overlay_height != fb_h) {
+      circle_free_fbl(FB_LAYER_STATUS);
+      circle_alloc_fbl(FB_LAYER_STATUS, 0 /* indexed */,
+                       &overlay_buf, OVERLAY_WIDTH, overlay_height,
+                       &overlay_buf_pitch);
+    }
+  } else {
+    overlay_display_height = overlay_height;
+  }
+
   // Use negative hstretch here so our overlay is stretched to the full
   // horizontal resolution rather than vertical.
   circle_set_stretch_fbl(FB_LAYER_STATUS,
-      -(double)OVERLAY_WIDTH/(double)OVERLAY_HEIGHT, 1.0, 0, 0, 0, 0);
-  // We want our status bar to show up at the bottom of the screen with
-  // padding set by user.
-  circle_set_valign_fbl(FB_LAYER_STATUS, 1 /* BOTTOM */, padding);
+      -(double)OVERLAY_WIDTH/(double)overlay_height, 1.0, 0, 0, 0, 0);
+  // Keep the layer top-aligned. Statusbar padding is applied inside the
+  // buffer so diagnostics can stay at the screen top.
+  circle_set_valign_fbl(FB_LAYER_STATUS, -1 /* TOP */, 0);
 
   // Start with complete transparent overlay
-  memset(overlay_buf, TRANSPARENT_COLOR, overlay_buf_pitch * OVERLAY_HEIGHT);
+  memset(overlay_buf, TRANSPARENT_COLOR, overlay_buf_pitch * overlay_height);
 
   // Figure out inset that will center our template.
   if (emux_machine_class == BMC64_MACHINE_CLASS_VIC20) {
@@ -213,7 +400,7 @@ uint8_t *overlay_init(int padding, int c40_80_state, int vkbd_transparency) {
   }
 
   inset_x = OVERLAY_WIDTH / 2 - (strlen(template) * FONT_ADVANCE) / 2;
-  inset_y = OVERLAY_HEIGHT - 1 - STATUS_BAR_HEIGHT + 1*SCALE_XY;
+  update_statusbar_position();
 
   // Positions relative to start of text (before inset)
   drive_x[0] = 2 * FONT_ADVANCE;
@@ -241,12 +428,51 @@ uint8_t *overlay_init(int padding, int c40_80_state, int vkbd_transparency) {
 
 void overlay_statusbar_enable(void) {
   statusbar_enabled = 1;
+  statusbar_showing = 1;
   draw_statusbar();
+  overlay_update_layer_visibility();
 }
 
 void overlay_statusbar_disable(void) {
   statusbar_enabled = 0;
+  statusbar_showing = 0;
   clear_statusbar();
+  overlay_update_layer_visibility();
+}
+
+void overlay_diagnostics_set_mode(int mode) {
+  if (mode < DIAG_MODE_OFF || mode > DIAG_MODE_EXTENDED) {
+    mode = DIAG_MODE_OFF;
+  }
+
+  if (!overlay_buf) {
+    diagnostics_mode = mode;
+    diagnostics_showing = mode != DIAG_MODE_OFF;
+    return;
+  }
+
+  clear_diagnostics();
+  diagnostics_mode = mode;
+  diagnostics_showing = mode != DIAG_MODE_OFF;
+
+  if (diagnostics_showing) {
+    draw_diagnostics();
+  }
+  overlay_update_layer_visibility();
+}
+
+int overlay_diagnostics_get_mode(void) {
+  return diagnostics_mode;
+}
+
+void overlay_diagnostics_set_frame_stats(unsigned fps_milli,
+                                         unsigned core_busy_milli) {
+  diagnostics_fps_milli = fps_milli;
+  diagnostics_core_busy_milli = core_busy_milli;
+
+  if (diagnostics_showing) {
+    draw_diagnostics();
+  }
 }
 
 // Some activity means statusbar should show (if menu option set)
@@ -490,6 +716,8 @@ void overlay_joyswap_changed(int swap) {
 
 // Checks whether a showing overlay due to activity should no longer be showing
 void overlay_check(void) {
+  overlay_update_layer_visibility();
+
   // Rollover safe way of checking duration
   if (statusbar_enabled && circle_get_ticks() - statusbar_start >= statusbar_delay) {
       overlay_statusbar_dismiss();
@@ -504,9 +732,18 @@ void overlay_statusbar_dismiss(void) {
 
 void overlay_change_padding(int padding) {
   circle_hide_fbl(FB_LAYER_STATUS);
+  overlay_padding = padding;
+  update_statusbar_position();
+  memset(overlay_buf, TRANSPARENT_COLOR, overlay_buf_pitch * overlay_height);
   statusbar_showing = 0;
   vkbd_showing = 0;
-  circle_set_valign_fbl(FB_LAYER_STATUS, 1 /* BOTTOM */, padding);
+  diagnostics_showing = 0;
+  circle_set_valign_fbl(FB_LAYER_STATUS, -1 /* TOP */, 0);
+  diagnostics_showing = diagnostics_mode != DIAG_MODE_OFF;
+  if (diagnostics_showing) {
+    draw_diagnostics();
+  }
+  overlay_update_layer_visibility();
 }
 
 void overlay_change_vkbd_transparency(int transparency) {
@@ -531,6 +768,7 @@ void overlay_40_80_columns_changed(int value) {
   if (!overlay_buf)
     return;
 
+  update_statusbar_position();
   statusbar_triggered_by_activity();
 
   if (!statusbar_enabled) return;
@@ -549,7 +787,7 @@ static void overlay_clear_virtual_keyboard() {
   int vkbd_height = emux_get_vkbd_height();
 
   int cx = (OVERLAY_WIDTH - vkbd_width) / 2;
-  int cy = (OVERLAY_HEIGHT - vkbd_height) / 2;
+  int cy = (overlay_height - vkbd_height) / 2;
 
   // Clear background for keyboard
   ui_draw_rect_buf(cx-1, cy-1, vkbd_width+2, vkbd_height+2,
@@ -563,7 +801,7 @@ static void overlay_draw_virtual_keyboard() {
   int vkbd_width = emux_get_vkbd_width();
   int vkbd_height = emux_get_vkbd_height();
   int cx = (OVERLAY_WIDTH - vkbd_width) / 2;
-  int cy = (OVERLAY_HEIGHT - vkbd_height) / 2;
+  int cy = (overlay_height - vkbd_height) / 2;
 
   // Clear background for keyboard
   ui_draw_rect_buf(cx-1, cy-1, vkbd_width+2, vkbd_height+2,
@@ -715,12 +953,16 @@ static void overlay_draw_virtual_keyboard() {
 
 void vkbd_enable() {
    vkbd_enabled = 1;
+   vkbd_showing = 1;
    overlay_draw_virtual_keyboard();
+   overlay_update_layer_visibility();
 }
 
 void vkbd_disable() {
    vkbd_enabled = 0;
+   vkbd_showing = 0;
    overlay_clear_virtual_keyboard();
+   overlay_update_layer_visibility();
 }
 
 void vkbd_nav_up(void) {

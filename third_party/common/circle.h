@@ -27,6 +27,8 @@
 #ifndef EMU_COMMON_H
 #define EMU_COMMON_H
 
+#include "sound_output_priority.h"
+
 // This is an interface layer describing both functions
 // the kernel needs to invoke on the emulator and for the
 // emulator to use some facilities provided by the kernel.
@@ -73,6 +75,7 @@
 #define FB_LAYER_VDC    1
 #define FB_LAYER_STATUS 2
 #define FB_LAYER_UI     3
+#define FB_LAYER_MASK(layer) (1U << (layer))
 
 #define USB_PREF_ANALOG 0
 #define USB_PREF_HAT 1
@@ -119,6 +122,12 @@
 #define BTN_ASSIGN_VKBD_TOGGLE 28
 #define BTN_ASSIGN_RESET_MENU 29
 #define BTN_ASSIGN_FLUSH_DISK 30
+#define BTN_ASSIGN_ATTACH_TAPE 31
+#define BTN_ASSIGN_ATTACH_CART 32
+#define BTN_ASSIGN_ATTACH_DISK_8 33
+#define BTN_ASSIGN_ATTACH_DISK_9 34
+#define BTN_ASSIGN_ATTACH_DISK_10 35
+#define BTN_ASSIGN_ATTACH_DISK_11 36
 
 // These are intermediate values not meant to
 // be directly assigned to buttons. Never used as
@@ -207,7 +216,7 @@ extern void circle_free_fbl(int layer);
 extern void circle_clear_fbl(int layer);
 extern void circle_show_fbl(int layer);
 extern void circle_hide_fbl(int layer);
-extern void circle_frames_ready_fbl(int layer1, int layer2, int sync);
+extern void circle_present_fbl(uint32_t ready_mask, int sync);
 extern void circle_set_palette_fbl(int layer, uint8_t index, uint16_t rgb565);
 extern void circle_set_palette32_fbl(int layer, uint8_t index, uint32_t argb);
 extern void circle_update_palette_fbl(int layer);
@@ -227,11 +236,27 @@ extern void circle_find_usb(int (*usb)[3]);
 extern int circle_mount_usb(int usb);
 extern int circle_unmount_usb(int usb);
 extern void circle_set_volume(int value);
+extern int circle_get_sound_output_priority(void);
+extern void circle_set_sound_output_priority(int value);
 extern int circle_get_model();
 extern int circle_cycles_per_sec();
 extern unsigned circle_get_arm_clock();
 extern int circle_gpio_enabled();
 extern int circle_gpio_outputs_enabled();
+
+struct bmx_diagnostics_snapshot {
+  uint32_t ram_total_kb;
+  uint32_t heap_free_kb;
+  uint32_t heap_low_free_kb;
+  uint32_t heap_high_free_kb;
+  uint32_t arm_clock_hz;
+  uint32_t emu_cycles_per_sec;
+  uint32_t temperature_c;
+  uint32_t throttle_clock_hz;
+};
+
+extern void circle_get_diagnostics(struct bmx_diagnostics_snapshot *snapshot);
+extern int circle_prepare_system_shutdown(void);
 
 extern int circle_sound_init(const char *param, int *speed, int *fragsize,
                         int *fragnr, int *channels);
@@ -244,6 +269,7 @@ extern int circle_sound_bufferspace(void);
 extern uint8_t circle_get_userport_ddr(void);
 extern uint8_t circle_get_userport(void);
 extern void circle_set_userport(uint8_t value);
+extern int circle_get_bmx_version(char *version, unsigned version_size);
 extern void circle_kernel_core_init_complete(int core);
 extern void circle_get_fbl_dimensions(int layer,
                                       int *display_w, int *display_h,

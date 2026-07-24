@@ -39,6 +39,7 @@
 #include "joy.h"
 #include "kbd.h"
 #include "menu.h"
+#include "overlay.h"
 #include "font.h"
 #include "menu_timing.h"
 
@@ -96,10 +97,28 @@ static int menu_window_bottom[NUM_MENU_ROOTS];
 // The index of the last item + 1. Can't set cursor to this or higher.
 static int max_index[NUM_MENU_ROOTS];
 
-static int pending_ui_key_head = 0;
-static int pending_ui_key_tail = 0;
+static unsigned pending_ui_key_head = 0U;
+static unsigned pending_ui_key_tail = 0U;
 static long pending_ui_key[16];
 static int pending_ui_key_pressed[16];
+
+// This overlay is entered only by the explicit System > Update action.  It
+// owns no network or update callback and therefore cannot start work by
+// itself.  All strings are fixed here; authenticated or remote values never
+// reach the renderer.
+static volatile int update_progress_active;
+static unsigned update_progress_phase;
+static unsigned update_progress_per_mille;
+static int update_progress_determinate;
+static int update_progress_cancel_enabled;
+static volatile int update_progress_cancel_requested;
+static int update_progress_rendered;
+static unsigned update_progress_rendered_phase;
+static unsigned update_progress_rendered_per_mille;
+static int update_progress_rendered_determinate;
+static int update_progress_rendered_cancel_enabled;
+static int update_progress_rendered_cancel_requested;
+static uint32_t update_progress_rendered_ticks;
 
 // Global callback for events that happen on menu items
 void (*on_value_changed)(struct menu_item *) = NULL;
@@ -512,14 +531,106 @@ static void ui_action_frame() {
   }
 }
 
+static const char *ui_update_progress_phase_name(unsigned phase) {
+  static const char *const names[] = {
+    "Discovery", "Manifest", "ZIP", "Hash", "Stage", "Reboot"
+  };
+  return phase < sizeof(names) / sizeof(names[0]) ? names[phase] : "Update";
+}
+
+static void ui_render_update_progress(void) {
+  enum {
+    BOX_WIDTH = 30 * 8,
+    BOX_HEIGHT = 8 * 8,
+    BAR_WIDTH = 26 * 8
+  };
+  char value[24];
+  int left;
+  int top;
+  int filled;
+
+  if (!update_progress_active || ui_fb == NULL || ui_fb_w <= 0 || ui_fb_h <= 0) {
+    return;
+  }
+  // The framebuffer can be a larger offscreen surface than the source
+  // rectangle that is actually scanned out.  The root menu is already
+  // centered in that visible rectangle, so reuse its center here.
+  if (menu_roots[0].menu_width > 0 && menu_roots[0].menu_height > 0) {
+    left = menu_roots[0].menu_left +
+           (menu_roots[0].menu_width - BOX_WIDTH) / 2;
+    top = menu_roots[0].menu_top +
+          (menu_roots[0].menu_height - BOX_HEIGHT) / 2;
+  } else {
+    left = (ui_fb_w - BOX_WIDTH) / 2;
+    top = (ui_fb_h - BOX_HEIGHT) / 2;
+  }
+  if (left < 0) left = 0;
+  if (top < 0) top = 0;
+  if (ui_fb_w < BOX_WIDTH) {
+    left = 0;
+  } else if (left > ui_fb_w - BOX_WIDTH) {
+    left = ui_fb_w - BOX_WIDTH;
+  }
+  if (ui_fb_h < BOX_HEIGHT) {
+    top = 0;
+  } else if (top > ui_fb_h - BOX_HEIGHT) {
+    top = ui_fb_h - BOX_HEIGHT;
+  }
+
+  ui_draw_rect(left, top, BOX_WIDTH, BOX_HEIGHT, BG_COLOR, 1);
+  ui_draw_rect(left, top, BOX_WIDTH, BOX_HEIGHT, BORDER_COLOR, 0);
+  ui_draw_text("BMX Update", left + 2 * 8, top + 8, FG_COLOR);
+  ui_draw_text(ui_update_progress_phase_name(update_progress_phase),
+               left + 2 * 8, top + 3 * 8, FG_COLOR);
+
+  ui_draw_rect(left + 2 * 8, top + 4 * 8, BAR_WIDTH, 6, BORDER_COLOR, 0);
+  filled = update_progress_determinate
+      ? (int)((update_progress_per_mille * (BAR_WIDTH - 2U)) / 1000U)
+      : 0;
+  if (filled > 0) {
+    ui_draw_rect(left + 2 * 8 + 1, top + 4 * 8 + 1,
+                 filled, 4, HILITE_COLOR, 1);
+  }
+  if (update_progress_determinate) {
+    snprintf(value, sizeof(value), "%u.%u%%",
+             update_progress_per_mille / 10U,
+             update_progress_per_mille % 10U);
+  } else {
+    snprintf(value, sizeof(value), "%s", "Working...");
+  }
+  value[sizeof(value) - 1U] = '\0';
+  ui_draw_text(value, left + 2 * 8, top + 5 * 8, FG_COLOR);
+
+  if (update_progress_cancel_requested) {
+    ui_draw_text("Cancel pending safely", left + 2 * 8,
+                 top + 6 * 8, FG_COLOR);
+  } else if (update_progress_cancel_enabled) {
+    ui_draw_text("RETURN/ESC: Cancel", left + 2 * 8,
+                 top + 6 * 8, FG_COLOR);
+  } else {
+    ui_draw_text("Do not turn off BMX", left + 2 * 8,
+                 top + 6 * 8, FG_COLOR);
+  }
+}
+
 void ui_render_single_frame() {
+  uint32_t ready_mask = FB_LAYER_MASK(FB_LAYER_UI);
+
   // Start with transparent
   memset(ui_fb, TRANSPARENT_COLOR, ui_fb_h * ui_fb_pitch);
 
   for (int msi=0;msi<=current_menu;msi++) {
      ui_render_now(msi);
   }
-  circle_frames_ready_fbl(FB_LAYER_UI, -1 /* no 2nd layer */, 1 /* sync */);
+
+  ui_render_update_progress();
+
+  if (overlay_dirty && !overlay_status_layer_suppressed()) {
+    ready_mask |= FB_LAYER_MASK(FB_LAYER_STATUS);
+    overlay_dirty = 0;
+  }
+
+  circle_present_fbl(ready_mask, 1 /* sync */);
   circle_yield();
 }
 
@@ -585,6 +696,12 @@ static void ui_action(long action) {
     break;
   case ACTION_Left:
   case ACTION_MiniLeft:
+    if (action == ACTION_Left &&
+        menu_roots[current_menu].left_right_listener_func &&
+        menu_roots[current_menu].left_right_listener_func(
+            &menu_roots[current_menu], cur, 0)) {
+      break;
+    }
     if (cur->disabled) break;
     if (cur->type == RANGE) {
       if (action == ACTION_MiniLeft)
@@ -624,6 +741,12 @@ static void ui_action(long action) {
     break;
   case ACTION_Right:
   case ACTION_MiniRight:
+    if (action == ACTION_Right &&
+        menu_roots[current_menu].left_right_listener_func &&
+        menu_roots[current_menu].left_right_listener_func(
+            &menu_roots[current_menu], cur, 1)) {
+      break;
+    }
     if (cur->disabled) break;
     if (cur->type == RANGE) {
       if (action == ACTION_MiniRight)
@@ -706,7 +829,20 @@ static void ui_action(long action) {
 // queue a key for press/release on the UI loop
 void emu_ui_key_interrupt(long key, int pressed) {
   circle_lock_acquire();
-  int i = pending_ui_key_tail & 0xf;
+  if (update_progress_active && update_progress_cancel_enabled && !pressed &&
+      (key == KEYCODE_Return || key == KEYCODE_Escape ||
+       key == KEYCODE_BackQuote)) {
+    // Latch immediately even if a synchronous TLS call is currently inside
+    // Circle.  The operation observes it at its next cooperative safe point.
+    update_progress_cancel_requested = 1;
+  }
+  // Keep the newest complete input events while a synchronous foreground
+  // operation is between cooperative pump points.  The old code could write
+  // past the 16-entry processing array after a slow network operation.
+  if (pending_ui_key_tail - pending_ui_key_head >= 16U) {
+    pending_ui_key_head++;
+  }
+  int i = (int)(pending_ui_key_tail & 0xfU);
   pending_ui_key[i] = key;
   pending_ui_key_pressed[i] = pressed;
   pending_ui_key_tail++;
@@ -728,14 +864,32 @@ void ui_check_key(void) {
   // outside the queue lock.
   circle_lock_acquire();
   int process_index = 0;
-  while (pending_ui_key_head != pending_ui_key_tail) {
-    int i = pending_ui_key_head & 0xf;
+  if (pending_ui_key_tail - pending_ui_key_head > 16U) {
+    pending_ui_key_head = pending_ui_key_tail - 16U;
+  }
+  while (pending_ui_key_head != pending_ui_key_tail && process_index < 16) {
+    int i = (int)(pending_ui_key_head & 0xfU);
     process_ui_key[process_index] = pending_ui_key[i];
     process_ui_key_pressed[process_index] = pending_ui_key_pressed[i];
     process_index++;
     pending_ui_key_head++;
   }
   circle_lock_release();
+
+  if (update_progress_active) {
+    // The modal progress overlay never re-enters menu callbacks.  Return and
+    // Escape are the only accepted actions; everything else is consumed.
+    for (int i=0;i<process_index;i++) {
+      if (update_progress_cancel_enabled && !process_ui_key_pressed[i] &&
+          (process_ui_key[i] == KEYCODE_Return ||
+           process_ui_key[i] == KEYCODE_Escape ||
+           process_ui_key[i] == KEYCODE_BackQuote)) {
+        update_progress_cancel_requested = 1;
+      }
+    }
+    ui_key_action = ACTION_None;
+    return;
+  }
 
   // Now process the ui keys
   for (int i=0;i<process_index;i++) {
@@ -748,6 +902,104 @@ void ui_check_key(void) {
 
   // Ui action frame tick
   ui_action_frame();
+}
+
+int ui_update_progress_begin(void) {
+  if (update_progress_active || !ui_enabled || current_menu < 0) return 0;
+  update_progress_active = 1;
+  update_progress_phase = 0U;
+  update_progress_per_mille = 0U;
+  update_progress_determinate = 0;
+  update_progress_cancel_enabled = 1;
+  update_progress_cancel_requested = 0;
+  update_progress_rendered = 0;
+  ui_key_action = ACTION_None;
+  return 1;
+}
+
+void ui_update_progress_present(unsigned phase, unsigned progress_per_mille,
+                                int determinate, int cancel_enabled,
+                                int cancel_pending) {
+  if (!update_progress_active) return;
+  update_progress_phase = phase < 6U ? phase : 5U;
+  update_progress_per_mille = progress_per_mille <= 1000U
+      ? progress_per_mille : 1000U;
+  update_progress_determinate = determinate != 0;
+  update_progress_cancel_enabled = cancel_enabled != 0;
+  if (cancel_pending) update_progress_cancel_requested = 1;
+}
+
+static int ui_update_progress_should_render(uint32_t now) {
+  if (!update_progress_active) return 0;
+  if (!update_progress_rendered) return 1;
+
+  // State changes that alter the meaning or safety message of the overlay
+  // must be visible at the very next cooperative checkpoint.
+  if (update_progress_phase != update_progress_rendered_phase ||
+      update_progress_determinate != update_progress_rendered_determinate ||
+      update_progress_cancel_enabled !=
+          update_progress_rendered_cancel_enabled ||
+      update_progress_cancel_requested !=
+          update_progress_rendered_cancel_requested) {
+    return 1;
+  }
+
+  // Pure progress changes, including resets and 100%, obey one hard 5 Hz
+  // limit.  circle_get_ticks() exposes unsigned long, but Circle's clock
+  // value wraps at UINT32_MAX on both supported targets.  Keeping both sides
+  // explicitly 32-bit makes the subtraction wrap correctly on Pi 5 too.
+  return update_progress_determinate &&
+      update_progress_per_mille != update_progress_rendered_per_mille &&
+      (uint32_t)(now - update_progress_rendered_ticks) >=
+          UI_UPDATE_PROGRESS_RENDER_INTERVAL_TICKS;
+}
+
+static void ui_update_progress_mark_rendered(uint32_t now) {
+  update_progress_rendered = 1;
+  update_progress_rendered_phase = update_progress_phase;
+  update_progress_rendered_per_mille = update_progress_per_mille;
+  update_progress_rendered_determinate = update_progress_determinate;
+  update_progress_rendered_cancel_enabled = update_progress_cancel_enabled;
+  update_progress_rendered_cancel_requested =
+      update_progress_cancel_requested;
+  update_progress_rendered_ticks = now;
+}
+
+int ui_update_progress_pump(void) {
+  uint32_t now;
+
+  if (!update_progress_active) return 0;
+  circle_check_gpio();
+  ui_check_key();
+  now = (uint32_t)circle_get_ticks();
+  if (ui_update_progress_should_render(now)) {
+    // Snapshot before rendering.  If an interrupt latches cancellation while
+    // the synchronous present yields, the second check below still notices
+    // and displays that safety transition immediately.
+    ui_update_progress_mark_rendered(now);
+    ui_render_single_frame();
+  } else {
+    // ui_render_single_frame() normally performs this yield.  Skipped frames
+    // must still service USB/network tasks and allow input interrupts to run.
+    circle_yield();
+  }
+  if (update_progress_cancel_requested !=
+      update_progress_rendered_cancel_requested) {
+    now = (uint32_t)circle_get_ticks();
+    ui_update_progress_mark_rendered(now);
+    ui_render_single_frame();
+  }
+  hdmi_timing_hook();
+  emux_ensure_video();
+  return update_progress_cancel_requested;
+}
+
+void ui_update_progress_end(void) {
+  update_progress_active = 0;
+  update_progress_cancel_enabled = 0;
+  update_progress_cancel_requested = 0;
+  update_progress_rendered = 0;
+  ui_key_action = ACTION_None;
 }
 
 void ui_handle_toggle_or_quick_func() {
@@ -836,8 +1088,13 @@ static struct menu_item *ui_new_item(struct menu_item *parent, const char *name,
                                      int id) {
   struct menu_item *new_item =
       (struct menu_item *)malloc(sizeof(struct menu_item));
+  size_t name_length = strlen(name);
+  if (name_length >= sizeof new_item->name) {
+    name_length = sizeof new_item->name - 1;
+  }
   memset(new_item, 0, sizeof(struct menu_item));
-  strncpy(new_item->name, name, MAX_MENU_STR);
+  memcpy(new_item->name, name, name_length);
+  new_item->name[name_length] = '\0';
   new_item->id = id;
 
   // Inherit parent dimensions
@@ -1247,10 +1504,13 @@ void ui_render_now(int menu_stack_index) {
        ui_draw_shadow_text("*", &qx, &qy, 1);
     }
 
-    qx = cx; qy+=20;
-    ui_draw_shadow_text("Use , and . for", &qx, &qy, 1);
-    qx = cx; qy+=10;
-    ui_draw_shadow_text("-/+1 increments.", &qx, &qy, 1);
+    if (menu_cursor_item[current_menu] != NULL &&
+        menu_cursor_item[current_menu]->type == RANGE) {
+      qx = cx; qy+=20;
+      ui_draw_shadow_text("Use , and . for", &qx, &qy, 1);
+      qx = cx; qy+=10;
+      ui_draw_shadow_text("-/+1 increments.", &qx, &qy, 1);
+    }
   }
 }
 
@@ -1383,6 +1643,7 @@ struct menu_item *ui_push_menu(int w_chars, int h_chars) {
 
   // Client must set callback on each push so clear here.
   menu_roots[current_menu].on_value_changed = NULL;
+  menu_roots[current_menu].left_right_listener_func = NULL;
   menu_roots[current_menu].on_popped_off = NULL;
   menu_roots[current_menu].on_popped_to = NULL;
 
@@ -1489,7 +1750,131 @@ void ui_info(const char *format, ...) {
   ui_render_single_frame();
 }
 
-void ui_confirm_wrapped(char *title, const char *txt, int ok_value, int ok_id) {
+// Add bounded text as independently stored menu rows. Horizontal whitespace
+// is normalized for word wrapping, while explicit line endings remain hard
+// breaks (including empty lines). Long words are split without ever exceeding
+// either the 30-column dialog interior or menu_item::name.
+static int ui_add_wrapped_line(struct menu_item *root, int item_id,
+                               const char *line, size_t *line_count) {
+  if (*line_count >= UI_WRAPPED_DIALOG_MAX_LINES) return 0;
+  ui_menu_add_button(item_id, root, line);
+  ++*line_count;
+  return 1;
+}
+
+static void ui_add_wrapped_text(struct menu_item *root, const char *txt,
+                                int item_id) {
+  char line[UI_WRAPPED_DIALOG_LINE_COLUMNS + 1U];
+  size_t input_pos = 0U;
+  size_t line_pos = 0U;
+  size_t line_count = 0U;
+  int line_had_content = 0;
+  int ended_with_newline = 0;
+
+  line[0] = '\0';
+  while (txt != NULL && input_pos < UI_WRAPPED_DIALOG_MAX_TEXT &&
+         txt[input_pos] != '\0') {
+    if (txt[input_pos] == '\r' || txt[input_pos] == '\n') {
+      if (line_pos > 0U) {
+        line[line_pos] = '\0';
+        if (!ui_add_wrapped_line(root, item_id, line, &line_count)) return;
+      } else if (!line_had_content) {
+        if (!ui_add_wrapped_line(root, item_id, "", &line_count)) return;
+      }
+      line_pos = 0U;
+      line_had_content = 0;
+      ended_with_newline = 1;
+      if (txt[input_pos] == '\r' &&
+          input_pos + 1U < UI_WRAPPED_DIALOG_MAX_TEXT &&
+          txt[input_pos + 1U] == '\n') {
+        ++input_pos;
+      }
+      ++input_pos;
+      continue;
+    }
+
+    if (txt[input_pos] == ' ' || txt[input_pos] == '\t') {
+      do {
+        ++input_pos;
+      } while (input_pos < UI_WRAPPED_DIALOG_MAX_TEXT &&
+               (txt[input_pos] == ' ' || txt[input_pos] == '\t'));
+      continue;
+    }
+
+    size_t word_end = input_pos;
+    while (word_end < UI_WRAPPED_DIALOG_MAX_TEXT &&
+           txt[word_end] != '\0' && txt[word_end] != ' ' &&
+           txt[word_end] != '\t' && txt[word_end] != '\r' &&
+           txt[word_end] != '\n') {
+      ++word_end;
+    }
+    if (line_pos != 0U) {
+      const size_t word_length = word_end - input_pos;
+      const size_t available =
+          UI_WRAPPED_DIALOG_LINE_COLUMNS - line_pos;
+      if (word_length + 1U <= available) {
+        line[line_pos++] = ' ';
+      } else {
+        line[line_pos] = '\0';
+        if (!ui_add_wrapped_line(root, item_id, line, &line_count)) return;
+        line_pos = 0U;
+      }
+    }
+    while (input_pos < word_end) {
+      size_t available = UI_WRAPPED_DIALOG_LINE_COLUMNS - line_pos;
+      size_t remaining = word_end - input_pos;
+      size_t amount = remaining < available ? remaining : available;
+      memcpy(line + line_pos, txt + input_pos, amount);
+      line_pos += amount;
+      input_pos += amount;
+      line_had_content = 1;
+      ended_with_newline = 0;
+      if (input_pos < word_end ||
+          line_pos == UI_WRAPPED_DIALOG_LINE_COLUMNS) {
+        line[line_pos] = '\0';
+        if (!ui_add_wrapped_line(root, item_id, line, &line_count)) return;
+        line_pos = 0U;
+      }
+    }
+  }
+  if (line_pos > 0U) {
+    line[line_pos] = '\0';
+    ui_add_wrapped_line(root, item_id, line, &line_count);
+  } else if (ended_with_newline) {
+    ui_add_wrapped_line(root, item_id, "", &line_count);
+  }
+}
+
+static struct menu_item *ui_push_wrapped_message(int is_error,
+                                                  const char *txt) {
+  const int item_id = is_error ? MENU_ERROR_DIALOG : MENU_INFO_DIALOG;
+  struct menu_item *root = ui_push_menu(30, 10);
+  ui_menu_add_button(item_id, root, is_error ? "Error" : "Info");
+  ui_menu_add_divider(root);
+  ui_add_wrapped_text(root, txt, item_id);
+
+  // Match ui_error/ui_info when a caller needs an OSD outside the open menu.
+  ui_transparent_layer = 0;
+  if (!ui_enabled) {
+    ui_enable_osd();
+    root->on_popped_off = glob_osd_popped;
+  }
+  ui_render_single_frame();
+  return root;
+}
+
+void ui_error_wrapped(const char *txt) {
+  ui_push_wrapped_message(1, txt);
+}
+
+void ui_info_wrapped(const char *txt) {
+  ui_push_wrapped_message(0, txt);
+}
+
+static struct menu_item *ui_confirm_wrapped_internal(char *title,
+                                                     const char *txt,
+                                                     int ok_value, int ok_id,
+                                                     int cancel_default) {
   struct menu_item *root = ui_push_menu(30, 10);
   ui_menu_add_button(MENU_ERROR_DIALOG, root, title);
 
@@ -1499,40 +1884,35 @@ void ui_confirm_wrapped(char *title, const char *txt, int ok_value, int ok_id) {
      child->value = ok_value;
      child->sub_id = ok_id;
 
-     ui_menu_add_button(MENU_CONFIRM_CANCEL, root, "CANCEL");
+     child = ui_menu_add_button(MENU_CONFIRM_CANCEL, root, "CANCEL");
+     child->value = ok_value;
+     child->sub_id = ok_id;
   }
 
   ui_menu_add_divider(root);
-  char buf[512];
-  char line[64];
-  strcpy (buf, txt);
-  line[0] = '\0';
+  // The update warning can contain six complete 256-byte signed
+  // descriptions. Wrap directly from the caller's immutable buffer so there
+  // is no second large stack copy.
+  ui_add_wrapped_text(root, txt, MENU_INFO_DIALOG);
 
-  int buf_pos = 0;
-  int line_pos = 0;
-  char* word = strtok(buf," ");
-  while (word) {
-     int word_len = strlen(word);
-     if (buf_pos + word_len < 512) {
-        if (line_pos + word_len < 30) {
-           strcat(line, word);
-           strcat(line, " ");
-           line_pos += word_len + 1;
-        } else {
-           ui_menu_add_button(MENU_INFO_DIALOG, root, line);
-           strcpy(line, word);
-           strcat(line, " ");
-           line_pos = word_len + 1;
-        }
-        buf_pos += word_len + 1;
-     }
-     word = strtok(NULL," ");
+  if (cancel_default && ok_value >= 0 && ok_id >= 0) {
+     // Title, OK, CANCEL. Select CANCEL so Return cannot trigger a
+     // destructive action until the user explicitly moves to OK.
+     menu_cursor[current_menu] = 2;
   }
-  if (strlen(line) > 0) {
-     ui_menu_add_button(MENU_INFO_DIALOG, root, line);
-  }
-
   ui_render_single_frame();
+  return root;
+}
+
+struct menu_item *ui_confirm_wrapped(char *title, const char *txt,
+                                     int ok_value, int ok_id) {
+  return ui_confirm_wrapped_internal(title, txt, ok_value, ok_id, 0);
+}
+
+struct menu_item *ui_confirm_wrapped_cancel_default(char *title,
+                                                    const char *txt,
+                                                    int ok_value, int ok_id) {
+  return ui_confirm_wrapped_internal(title, txt, ok_value, ok_id, 1);
 }
 
 // These nav functions are really inefficient...but oh well.
@@ -1618,7 +1998,7 @@ void ui_enable_osd(void) {
   osd_active = 1;
   ui_enabled = 1;
   ui_make_transparent();
-  circle_frames_ready_fbl(FB_LAYER_UI, -1 /* no 2nd layer */, 0 /* nosync */);
+  circle_present_fbl(FB_LAYER_MASK(FB_LAYER_UI), 1 /* sync */);
   circle_show_fbl(FB_LAYER_UI);
 }
 
@@ -1689,6 +2069,9 @@ void emu_exit(void) {
     case BMC64_MACHINE_CLASS_C64:
       ui_draw_text_buf("C64 (Vice)", x, y, 1, fb, fb_pitch, 1);
       break;
+    case BMC64_MACHINE_CLASS_SCPU64:
+      ui_draw_text_buf("SCPU64 (Vice)", x, y, 1, fb, fb_pitch, 1);
+      break;
     case BMC64_MACHINE_CLASS_C128:
       ui_draw_text_buf("C128 (Vice)", x, y, 1, fb, fb_pitch, 1);
       break;
@@ -1728,7 +2111,7 @@ void emu_exit(void) {
   circle_set_palette_fbl(FB_LAYER_VIC, 0, COLOR16(0, 0, 0));
   circle_set_palette_fbl(FB_LAYER_VIC, 1, COLOR16(255, 255, 255));
   circle_update_palette_fbl(FB_LAYER_VIC);
-  circle_frames_ready_fbl(FB_LAYER_VIC, -1, 0);
+  circle_present_fbl(FB_LAYER_MASK(FB_LAYER_VIC), 0);
 }
 
 static void ui_update_children(struct menu_item *node,

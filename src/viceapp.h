@@ -47,6 +47,7 @@
 #include <string.h>
 
 #include "network/network_manager.h"
+#include "update/update_service.h"
 #include "viceemulatorcore.h"
 
 // GPIO  JSFUNC   KEYFUNC  KEYCON   gpioPins Index
@@ -247,6 +248,9 @@ class ViceScreenApp : public ViceApp {
 public:
   ViceScreenApp(const char *kernel)
       : ViceApp(kernel),
+        mEmulatorCore(nullptr),
+        mNetworkManager(nullptr),
+        mNetworkStarted(false),
         mTimer(&mInterrupt),
         mLogger(mOptions.GetLogLevel(), &mTimer),
         mGPIOManager(&mInterrupt)
@@ -256,7 +260,6 @@ public:
         {
      mEmulatorCore = new ViceEmulatorCore(&mMemory, circle_cycles_per_second());
      mNetworkManager = new bmx::NetworkManager();
-     mNetworkStarted = false;
   }
 
   virtual bool Initialize(void);
@@ -300,12 +303,13 @@ private:
 class ViceStdioApp : public ViceScreenApp {
 public:
   ViceStdioApp(const char *kernel)
-      : ViceScreenApp(kernel), mUSBHCII(&mInterrupt, &mTimer),
+      : ViceScreenApp(kernel), mUSBHCII(&mInterrupt, &mTimer, TRUE),
         mEMMC(&mInterrupt, &mTimer, &mActLED)
         {}
 
   virtual bool Initialize(void);
   virtual void Cleanup(void);
+  int PrepareSystemShutdown(void);
 
   void circle_find_usb(int (*usb)[3]);
   int circle_mount_usb(int usb);
@@ -333,6 +337,9 @@ protected:
   FATFS mFileSystemUSB2;
   FATFS mFileSystemUSB3;
   bool mUserFileSystemMounted = false;
+  bool mSYSFileSystemMounted = false;
+  bool mSDFileSystemMounted = false;
+  bool mUSBFileSystemMounted[3] = {false, false, false};
 
   int mBootStatWhat[MAX_BOOTSTAT_LINES];
   char *mBootStatFile[MAX_BOOTSTAT_LINES];

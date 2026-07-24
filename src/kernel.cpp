@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "kernel.h"
+#include "update/update_service.h"
 
 #include "platform/platform.h"
 
@@ -182,8 +183,8 @@ void circle_hide_fbl(int layer) {
   static_kernel->circle_hide_fbl(layer);
 }
 
-void circle_frames_ready_fbl(int layer1, int layer2, int sync) {
-  static_kernel->circle_frames_ready_fbl(layer1, layer2, sync);
+void circle_present_fbl(uint32_t ready_mask, int sync) {
+  static_kernel->circle_present_fbl(ready_mask, sync);
 }
 
 void circle_set_palette_fbl(int layer, uint8_t index, uint16_t rgb565) {
@@ -246,8 +247,22 @@ void circle_set_volume(int value) {
   static_kernel->circle_set_volume(value);
 }
 
+int circle_get_sound_output_priority() {
+  return static_kernel->circle_get_sound_output_priority();
+}
+
+void circle_set_sound_output_priority(int value) {
+  static_kernel->circle_set_sound_output_priority(value);
+}
+
 int circle_get_model() {
   return static_kernel->circle_get_model();
+}
+
+int circle_get_bmx_version(char *version, unsigned version_size) {
+  return bmx::update::ReadInstalledVersionForMenu(version, version_size)
+             ? 0
+             : 1;
 }
 
 unsigned circle_get_arm_clock() {
@@ -260,6 +275,14 @@ int circle_gpio_enabled() {
 
 int circle_gpio_outputs_enabled() {
   return static_kernel->circle_gpio_outputs_enabled();
+}
+
+void circle_get_diagnostics(struct bmx_diagnostics_snapshot *snapshot) {
+  static_kernel->circle_get_diagnostics(snapshot);
+}
+
+int circle_prepare_system_shutdown(void) {
+  return static_kernel->circle_prepare_system_shutdown();
 }
 
 void circle_kernel_core_init_complete(int core) {
@@ -347,13 +370,17 @@ long func_to_keycode(int btn_func) {
 
 CKernel::CKernel(void)
     : ViceStdioApp("vice"), mViceSound(nullptr),
+      mUSBMouse(nullptr), mUSBServicesReady(FALSE),
       mNumJoy(emu_get_num_joysticks()),
-      mVolume(100), mNumCoresComplete(0),
+      mVolume(100), mSoundOutputPriority(ViceSound::DefaultOutputPriority()),
+      mNumCoresComplete(0),
       mNeedSoundInit(false), mNumSoundChannels(1) {
   static_kernel = this;
   mod_states = 0;
   memset(key_states, 0, MAX_KEY_CODES * sizeof(bool));
   memset(key_mod_states, 0, MAX_KEY_CODES * sizeof(int));
+  memset(mUSBKeyboards, 0, sizeof mUSBKeyboards);
+  memset(mUSBGamepads, 0, sizeof mUSBGamepads);
 
   // Only used for pins that are used as buttons. See viceapp.h.
   for (int i = 0; i < NUM_GPIO_PINS; i++) {
@@ -418,6 +445,12 @@ static void exec_button_func(int button_func, int is_press, int is_ui) {
      case BTN_ASSIGN_40_80_COLUMN:
      case BTN_ASSIGN_VKBD_TOGGLE:
      case BTN_ASSIGN_FLUSH_DISK:
+     case BTN_ASSIGN_ATTACH_TAPE:
+     case BTN_ASSIGN_ATTACH_CART:
+     case BTN_ASSIGN_ATTACH_DISK_8:
+     case BTN_ASSIGN_ATTACH_DISK_9:
+     case BTN_ASSIGN_ATTACH_DISK_10:
+     case BTN_ASSIGN_ATTACH_DISK_11:
        if (is_press) {
           emu_quick_func_interrupt(button_func);
        }
@@ -694,8 +727,16 @@ void CKernel::SetupUSBKeyboard() {
 
     CUSBKeyboardDevice *pKeyboard =
         (CUSBKeyboardDevice *)mDeviceNameService.GetDevice(DeviceName, FALSE);
+
+    if (pKeyboard != mUSBKeyboards[i]) {
+      if (pKeyboard) {
+        pKeyboard->RegisterKeyStatusHandlerRaw(KeyStatusHandlerRaw);
+        printf("usb: registered keyboard ukbd%u\r\n", i + 1);
+      }
+      mUSBKeyboards[i] = pKeyboard;
+    }
+
     if (pKeyboard) {
-      pKeyboard->RegisterKeyStatusHandlerRaw(KeyStatusHandlerRaw);
       num_keyboards++;
     }
   }
@@ -706,8 +747,13 @@ void CKernel::SetupUSBKeyboard() {
 void CKernel::SetupUSBMouse() {
   CMouseDevice *pMouse =
       (CMouseDevice *)mDeviceNameService.GetDevice("mouse1", FALSE);
-  if (pMouse) {
-    pMouse->RegisterStatusHandler(MouseStatusHandler);
+
+  if (pMouse != mUSBMouse) {
+    if (pMouse) {
+      pMouse->RegisterStatusHandler(MouseStatusHandler);
+      printf("usb: registered mouse1\r\n");
+    }
+    mUSBMouse = pMouse;
   }
 }
 
@@ -716,26 +762,32 @@ void CKernel::SetupUSBGamepads() {
   int num_buttons[MAX_USB_DEVICES] = {0, 0, 0, 0};
   int num_axes[MAX_USB_DEVICES] = {0, 0, 0, 0};
   int num_hats[MAX_USB_DEVICES] = {0, 0, 0, 0};
-  while (num_pads < MAX_USB_DEVICES) {
+  for (unsigned i = 0; i < MAX_USB_DEVICES; i++) {
     CString DeviceName;
-    DeviceName.Format("upad%u", num_pads + 1);
+    DeviceName.Format("upad%u", i + 1);
 
     CUSBGamePadDevice *game_pad =
         (CUSBGamePadDevice *)mDeviceNameService.GetDevice(DeviceName, FALSE);
 
-    if (game_pad == 0) {
-      break;
+    if (game_pad != mUSBGamepads[i]) {
+      if (game_pad) {
+        game_pad->RegisterStatusHandler(GamePadStatusHandler);
+        printf("usb: registered gamepad upad%u\r\n", i + 1);
+      }
+      mUSBGamepads[i] = game_pad;
+    }
+
+    if (!game_pad) {
+      continue;
     }
 
     const TGamePadState *pState = game_pad->GetInitialState();
     assert(pState != 0);
 
-    num_axes[num_pads] = pState->naxes;
-    num_hats[num_pads] = pState->nhats;
-    num_buttons[num_pads] = pState->nbuttons;
-
-    game_pad->RegisterStatusHandler(GamePadStatusHandler);
-    num_pads++;
+    num_axes[i] = pState->naxes;
+    num_hats[i] = pState->nhats;
+    num_buttons[i] = pState->nbuttons;
+    num_pads = i + 1;
   }
 
   // Tell the emulator what we found
@@ -759,6 +811,9 @@ ViceApp::TShutdownMode CKernel::Run(void) {
 
   emu_set_demo_mode(mViceOptions.DemoEnabled());
   printf("boot: demo mode set\r\n");
+
+  __atomic_store_n(&mUSBServicesReady, TRUE, __ATOMIC_RELEASE);
+  printf("boot: usb plug-and-play ready\r\n");
 
 #ifndef BMC64_USE_EMU_MULTICORE
   printf("boot: launching emulator on core 0\r\n");
@@ -1202,7 +1257,8 @@ int CKernel::circle_sound_init(const char *param, int *speed, int *fragsize,
 #endif
   if (mViceSound) {
      mViceSound->CancelPlayback();
-     mViceSound->Playback(vol_percent_to_vchiq(mVolume), mNumSoundChannels);
+     mViceSound->Playback(vol_percent_to_vchiq(mVolume), mNumSoundChannels,
+                          mSoundOutputPriority);
   }
 #ifdef BMC64_USE_EMU_MULTICORE
   circle_lock_release();
@@ -1233,7 +1289,21 @@ int CKernel::circle_sound_bufferspace(void) {
   return FRAG_SIZE * NUM_FRAGS;
 }
 
-void CKernel::circle_yield(void) { CScheduler::Get()->Yield(); }
+void CKernel::circle_yield(void) {
+  if (__atomic_load_n(&mUSBServicesReady, __ATOMIC_ACQUIRE)) {
+    boolean usb_changed = mUSBHCII.UpdatePlugAndPlay();
+#if RASPPI >= 4
+    mUSBHCII.ProcessRecoveries();
+#endif
+    if (usb_changed) {
+      printf("usb: plug-and-play update\r\n");
+      SetupUSBKeyboard();
+      SetupUSBMouse();
+      SetupUSBGamepads();
+    }
+  }
+  CScheduler::Get()->Yield();
+}
 
 void CKernel::MouseStatusHandler(unsigned nButtons, int deltaX, int deltaY,
                                  int wheelMove) {
@@ -1451,8 +1521,11 @@ void CKernel::circle_check_gpio() {
   circle_lock_acquire();
   if (mNeedSoundInit && mNumCoresComplete >= 2) {
      mViceSound = new ViceSound(&mInterrupt, mViceOptions.GetAudioOut());
-     mViceSound->Playback(vol_percent_to_vchiq(mVolume), mNumSoundChannels);
-     mNeedSoundInit = false;
+     if (mViceSound) {
+       mViceSound->Playback(vol_percent_to_vchiq(mVolume), mNumSoundChannels,
+                            mSoundOutputPriority);
+       mNeedSoundInit = false;
+     }
   }
   circle_lock_release();
 #endif
@@ -1580,7 +1653,12 @@ void CKernel::circle_boot_complete() {
        // Cores 1/2 are done initing sound tables before we tried to
        // start playback device.
        mViceSound = new ViceSound(&mInterrupt, mViceOptions.GetAudioOut());
-       mViceSound->Playback(vol_percent_to_vchiq(mVolume), mNumSoundChannels);
+       if (!mViceSound) {
+         circle_lock_release();
+         return;
+       }
+       mViceSound->Playback(vol_percent_to_vchiq(mVolume), mNumSoundChannels,
+                            mSoundOutputPriority);
     } else {
        // Cores 1/2 are still initializing sound tables. We'll init
        // sound later.  This is to get around the crashing noise you
@@ -1590,11 +1668,16 @@ void CKernel::circle_boot_complete() {
     circle_lock_release();
 #else
     mViceSound = new ViceSound(&mInterrupt, mViceOptions.GetAudioOut());
-    mViceSound->Playback(vol_percent_to_vchiq(mVolume), mNumSoundChannels);
+    if (!mViceSound) {
+      return;
+    }
+    mViceSound->Playback(vol_percent_to_vchiq(mVolume), mNumSoundChannels,
+                         mSoundOutputPriority);
 #endif
   }
 
   DisableBootStat();
+
 }
 
 int CKernel::circle_alloc_fbl(int layer, int pixelmode, uint8_t **pixels,
@@ -1622,16 +1705,18 @@ void CKernel::circle_hide_fbl(int layer) {
   fbl[layer].Hide();
 }
 
-void CKernel::circle_frames_ready_fbl(int layer1, int layer2, int sync) {
-  // If we're going to sync to vblank, indicate this frame data should go
-  // to the offscreen resource.
-  fbl[layer1].FrameReady(sync);
-  if (layer2 >= 0) {
-     fbl[layer2].FrameReady(sync);
+void CKernel::circle_present_fbl(uint32_t ready_mask, int sync) {
+  if (ready_mask == 0) {
+    return;
   }
-  // Flip the buffers and wait for vblank.
-  FrameBufferLayer::SwapResources(sync,
-      &fbl[layer1], layer2 >= 0 ? &fbl[layer2] : nullptr);
+
+  for (unsigned i = 0; i < FB_NUM_LAYERS; i++) {
+    if (ready_mask & FB_LAYER_MASK(i)) {
+      fbl[i].FrameReady(sync);
+    }
+  }
+
+  FrameBufferLayer::PresentLayers(sync, fbl, ready_mask);
 }
 
 void CKernel::circle_set_palette_fbl(int layer, uint8_t index, uint16_t rgb565) {
@@ -1688,6 +1773,20 @@ void CKernel::circle_set_volume(int value) {
   circle_lock_release();
 }
 
+int CKernel::circle_get_sound_output_priority() {
+  return mSoundOutputPriority;
+}
+
+void CKernel::circle_set_sound_output_priority(int value) {
+  SoundOutputPriority priority = value == SOUND_OUTPUT_PRIORITY_USB_HDMI
+                                     ? SOUND_OUTPUT_PRIORITY_USB_HDMI
+                                     : SOUND_OUTPUT_PRIORITY_HDMI_USB;
+
+  circle_lock_acquire();
+  mSoundOutputPriority = priority;
+  circle_lock_release();
+}
+
 int CKernel::circle_get_model() {
   return mMachineInfo.GetModelMajor();
 }
@@ -1703,6 +1802,29 @@ int CKernel::circle_gpio_enabled() {
 
 int CKernel::circle_gpio_outputs_enabled() {
   return !mViceOptions.DPIEnabled() && mViceOptions.GPIOOutputsEnabled();
+}
+
+void CKernel::circle_get_diagnostics(struct bmx_diagnostics_snapshot *snapshot) {
+  if (snapshot == 0) {
+    return;
+  }
+
+  memset(snapshot, 0, sizeof(*snapshot));
+  snapshot->ram_total_kb = (uint32_t)(mMemory.GetMemSize() / 1024);
+  snapshot->heap_free_kb =
+      (uint32_t)(mMemory.GetHeapFreeSpace(HEAP_ANY) / 1024);
+  snapshot->heap_low_free_kb =
+      (uint32_t)(mMemory.GetHeapFreeSpace(HEAP_LOW) / 1024);
+  snapshot->heap_high_free_kb =
+      (uint32_t)(mMemory.GetHeapFreeSpace(HEAP_HIGH) / 1024);
+  snapshot->arm_clock_hz = mMachineInfo.GetClockRate(CLOCK_ID_ARM);
+  snapshot->emu_cycles_per_sec = circle_cycles_per_second();
+  snapshot->temperature_c = mCPUThrottle.GetTemperature();
+  snapshot->throttle_clock_hz = mCPUThrottle.GetClockRate();
+}
+
+int CKernel::circle_prepare_system_shutdown(void) {
+  return PrepareSystemShutdown();
 }
 
 // Called by cores 1 and 2 after they are done initializing

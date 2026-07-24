@@ -126,7 +126,7 @@ constexpr HdmiMode kModes[] = {
     {"CVT 1920x1200@50 16:10", "generated from cvt 1920 1200 50", 1920,
      1200, 49930, 158250000, 120, 200, 320, 3, 6, 29, false, true},
 
-    // BMC64 custom HDMI timings from sdcard/machines.txt. These are
+    // BMX custom HDMI timings from sdcard/machines.ini. These are
     // machine-specific because BMC64 nudges the pixel clock to match each
     // emulated machine's real cadence.
     {"BMC VIC20 768x525@60.285", "VIC20 NTSC hdmi_timings", 768, 525,

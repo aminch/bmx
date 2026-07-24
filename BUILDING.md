@@ -35,6 +35,8 @@ Kernel outputs:
 ```text
 build/pi4/vice310-images/kernel7l.img
 build/pi4/vice310-images/kernel7l.img.c64
+build/pi4/vice310-images/kernel7l.img.c64sc
+build/pi4/vice310-images/kernel7l.img.scpu64
 build/pi4/vice310-images/kernel7l.img.c128
 build/pi4/vice310-images/kernel7l.img.vic20
 build/pi4/vice310-images/kernel7l.img.plus4
@@ -79,6 +81,8 @@ Kernel outputs:
 ```text
 build/pi5/vice310-images/kernel_2712.img
 build/pi5/vice310-images/kernel_2712.img.c64
+build/pi5/vice310-images/kernel_2712.img.c64sc
+build/pi5/vice310-images/kernel_2712.img.scpu64
 build/pi5/vice310-images/kernel_2712.img.c128
 build/pi5/vice310-images/kernel_2712.img.vic20
 build/pi5/vice310-images/kernel_2712.img.plus4
@@ -137,10 +141,12 @@ enables UART diagnostics, second-stage firmware UART logging and
 ## Full SD Card Creation
 
 `tools/create_bmx_sd.py` prepares a complete two-partition BMX card from a
-staged boot tree. It creates a 128 MiB FAT32 `BMX BOOT` partition, a FAT32
-`BMX USER` partition using the remaining space, copies the staged boot files,
-and creates the standard user directories for disks, tapes, carts, snapshots
-and phonebooks.
+staged boot tree. It creates a 512 MiB FAT32 `BMX BOOT` partition by default,
+a FAT32 `BMX USER` partition using the remaining space, copies the staged boot
+files, and creates the standard user directories for disks, tapes, carts,
+snapshots and phonebooks. Values below 512 MiB are rejected for new BMX cards;
+this reserves space for transactional updates and the planned large Amiga
+kernels.
 
 Run it once without `--yes` to verify the target device and layout:
 
@@ -171,16 +177,3 @@ The build, stage and install scripts share this path contract:
 | `PI5_STAGE_DIR` | Pi5-specific stage directory override |
 | `BMC64_KERNEL_DIR` | Stage input override for prebuilt kernels |
 | `BMC64_BUILD_PROFILE` | Boot config profile for staging, `release` or `debug` |
-
-## Legacy Builds
-
-The old BMC64 scripts are retained for reference:
-
-```text
-tools/legacy/clean_all.sh
-tools/legacy/make_all.sh
-tools/legacy/make_machines.sh
-```
-
-Those scripts belong to the original Pi0/Pi2/Pi3 build flow. They are not the
-recommended entry point for Pi4 or Pi5.

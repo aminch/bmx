@@ -134,6 +134,13 @@ const unsigned long video_tick_inc = 10000;
 unsigned long video_freq;
 unsigned long video_frame_count;
 
+static unsigned long diagnostics_last_frame_start;
+static unsigned long diagnostics_last_frame_end;
+static unsigned long diagnostics_window_start;
+static unsigned diagnostics_presented_frames;
+static unsigned diagnostics_busy_samples;
+static unsigned diagnostics_busy_milli_sum;
+
 static int raspi_boot_warp = 1;
 /* Keep boot warp to the first rendered frame only.  The previous 120-frame
    delay held back the first visible synchronized frame by about 2.4 seconds. */
@@ -430,6 +437,27 @@ void vsyncarch_init(void) {
 void vsyncarch_presync(void) { kbdbuf_flush(); }
 
 void vsyncarch_postsync(void) {
+  unsigned long frame_start = circle_get_ticks();
+  unsigned core_busy_milli = 0;
+  uint32_t ready_mask = 0;
+
+  if (diagnostics_last_frame_start != 0 &&
+      diagnostics_last_frame_end != 0 &&
+      frame_start >= diagnostics_last_frame_start &&
+      frame_start >= diagnostics_last_frame_end) {
+    unsigned long total_us = frame_start - diagnostics_last_frame_start;
+    unsigned long busy_us = frame_start - diagnostics_last_frame_end;
+
+    if (total_us != 0 && busy_us <= total_us) {
+      core_busy_milli = (unsigned)((busy_us * 1000UL) / total_us);
+      if (core_busy_milli > 1000) {
+        core_busy_milli = 1000;
+      }
+      diagnostics_busy_milli_sum += core_busy_milli;
+      diagnostics_busy_samples++;
+    }
+  }
+
   emux_ensure_video();
 
   // This render will handle any OSDs we have. ODSs don't pause emulation.
@@ -437,16 +465,14 @@ void vsyncarch_postsync(void) {
     // The only way we can be here and have ui_enabled=1
     // is for an osd to be enabled.
     ui_render_now(-1); // only render top most menu
-    circle_frames_ready_fbl(FB_LAYER_UI, -1 /* no 2nd layer */, 0 /* no sync */);
+    ready_mask |= FB_LAYER_MASK(FB_LAYER_UI);
     ui_check_key();
   }
 
-  if (statusbar_showing || vkbd_showing) {
+  if (statusbar_showing || vkbd_showing || diagnostics_showing) {
     overlay_check();
-    if (overlay_dirty) {
-       circle_frames_ready_fbl(FB_LAYER_STATUS,
-                               -1 /* no 2nd layer */,
-                               0 /* no sync */);
+    if (overlay_dirty && !overlay_status_layer_suppressed()) {
+       ready_mask |= FB_LAYER_MASK(FB_LAYER_STATUS);
        overlay_dirty = 0;
     }
   }
@@ -471,11 +497,43 @@ void vsyncarch_postsync(void) {
   int raspi_present_frame =
       !raspi_warp || vic_frame_rendered || (raspi_has_vdc && vdc_frame_rendered);
   if (raspi_present_frame) {
-    circle_frames_ready_fbl(FB_LAYER_VIC,
-                           raspi_has_vdc ? FB_LAYER_VDC : -1,
-                           !raspi_boot_warp);
+    ready_mask |= FB_LAYER_MASK(FB_LAYER_VIC);
+    if (raspi_has_vdc) {
+      ready_mask |= FB_LAYER_MASK(FB_LAYER_VDC);
+    }
     vic_frame_rendered = 0;
     vdc_frame_rendered = 0;
+    diagnostics_presented_frames++;
+  }
+
+  if (ready_mask != 0) {
+    int present_sync = !raspi_boot_warp;
+    if (ready_mask & (FB_LAYER_MASK(FB_LAYER_UI) |
+                      FB_LAYER_MASK(FB_LAYER_STATUS))) {
+      present_sync = 1;
+    }
+    circle_present_fbl(ready_mask, present_sync);
+  }
+
+  if (diagnostics_window_start == 0) {
+    diagnostics_window_start = frame_start;
+  } else {
+    unsigned long elapsed_us = frame_start - diagnostics_window_start;
+    if (elapsed_us >= 500000UL) {
+      unsigned fps_milli =
+          (unsigned)(((unsigned long long)diagnostics_presented_frames *
+                      1000000000ULL) / elapsed_us);
+      unsigned avg_busy_milli = diagnostics_busy_samples == 0
+                                    ? core_busy_milli
+                                    : diagnostics_busy_milli_sum /
+                                          diagnostics_busy_samples;
+
+      overlay_diagnostics_set_frame_stats(fps_milli, avg_busy_milli);
+      diagnostics_window_start = frame_start;
+      diagnostics_presented_frames = 0;
+      diagnostics_busy_samples = 0;
+      diagnostics_busy_milli_sum = 0;
+    }
   }
 
   circle_check_gpio();
@@ -590,8 +648,11 @@ void vsyncarch_postsync(void) {
   }
 
   if (raspi_demo_mode) {
-    demo_check();
+     demo_check();
   }
+
+  diagnostics_last_frame_start = frame_start;
+  diagnostics_last_frame_end = circle_get_ticks();
 }
 
 void vsyncarch_sleep(unsigned long delay) {

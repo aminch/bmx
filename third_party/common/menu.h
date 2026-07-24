@@ -34,7 +34,9 @@
 #define RASPI_MENU_H
 
 // Make sure does not exceed max choices in ui.h
-#define NUM_BUTTON_ASSIGNMENTS 31
+#define NUM_BUTTON_ASSIGNMENTS 37
+
+#define DEFAULT_DISK_DRIVE_NONE 0
 
 // Never used as values. Can be reorged.
 typedef enum {
@@ -52,6 +54,10 @@ typedef enum {
    MENU_ATTACH_DISK_9,
    MENU_ATTACH_DISK_10,
    MENU_ATTACH_DISK_11,
+
+   MENU_DEFAULT_DISK_IMAGE,
+   MENU_DEFAULT_DISK_FILE,
+   MENU_DEFAULT_DISK_DRIVE,
 
    MENU_DETACH_DISK_8,
    MENU_DETACH_DISK_9,
@@ -251,6 +257,7 @@ typedef enum {
 
    MENU_DEMO_MODE,
    MENU_OVERLAY,
+   MENU_DIAGNOSTICS_OVERLAY,
 
    MENU_DRIVE_TYPE_8,
    MENU_DRIVE_TYPE_9,
@@ -451,7 +458,11 @@ typedef enum {
    MENU_CMDHD_MODE_11,
 
    MENU_VOLUME,
-   MENU_SWITCH_MACHINE,
+   MENU_SOUND_OUTPUT_PRIORITY,
+   MENU_MACHINE_EMULATOR,
+   MENU_MACHINE_VIDEO_STANDARD,
+   MENU_MACHINE_VIDEO_OUTPUT,
+   MENU_MACHINE_VIDEO_MODE,
 
    MENU_TAPE_FEEDBACK,
    MENU_MEMORY,
@@ -513,7 +524,21 @@ typedef enum {
    MENU_RS232NET_HAYES_AUDIO,
    MENU_RS232NET_PHONEBOOK,
    MENU_RS232NET_PHONEBOOK_FILE,
-   MENU_NETWORK_SAVE
+   MENU_NETWORK_SAVE,
+   MENU_PENDING_REBOOT,
+
+   MENU_SYSTEM_REBOOT,
+   MENU_SYSTEM_POWER_OFF,
+   MENU_CONFIRM_SYSTEM_REBOOT,
+   MENU_CONFIRM_SYSTEM_POWER_OFF,
+
+   MENU_SYSTEM_UPDATE,
+   MENU_SYSTEM_UPDATE_DRAFT,
+   MENU_CONFIRM_UPDATE_TEST_CHANNEL,
+   MENU_CONFIRM_UPDATE_DRAFT_AUTH,
+   MENU_CONFIRM_UPDATE_INSTALL,
+   MENU_CONFIRM_UPDATE_RESET_WARNING,
+   MENU_CONFIRM_UPDATE_RESET_INSTALL
 } MenuID;
 
 typedef enum {
@@ -524,6 +549,7 @@ typedef enum {
    MENU_SUB_ENTER_DIR,
    MENU_SUB_CHANGE_VOLUME,
    MENU_SUB_SELECT_VOLUME,
+   MENU_SUB_IMAGE_CONTENTS,
 } MenuSubID;
 
 // Used as indices
@@ -561,6 +587,12 @@ typedef enum {
    OVERLAY_ON_ACTIVITY
 } MenuOverlayOption;
 
+typedef enum {
+   DIAGNOSTICS_OVERLAY_OFF = 0,
+   DIAGNOSTICS_OVERLAY_COMPACT,
+   DIAGNOSTICS_OVERLAY_EXTENDED
+} MenuDiagnosticsOverlayOption;
+
 // Used as both indices and values. Don't reorg.
 typedef enum {
    HOTKEY_CHOICE_NONE = 0,
@@ -579,6 +611,12 @@ typedef enum {
    HOTKEY_CHOICE_PIP_SWAP,
    HOTKEY_CHOICE_40_80_COLUMN,
    HOTKEY_CHOICE_FLUSH_DISK,
+   HOTKEY_CHOICE_ATTACH_TAPE,
+   HOTKEY_CHOICE_ATTACH_CART,
+   HOTKEY_CHOICE_ATTACH_DISK_8,
+   HOTKEY_CHOICE_ATTACH_DISK_9,
+   HOTKEY_CHOICE_ATTACH_DISK_10,
+   HOTKEY_CHOICE_ATTACH_DISK_11,
 } HotKeyChoice;
 
 enum {
@@ -667,5 +705,10 @@ void menu_about_to_deactivate(void);
 
 void menu_quick_func(int button_assignment);
 const char* function_to_string(int);
+
+// Default disk settings consumed by the emulator after settings are loaded.
+const char *menu_default_disk_image(void);
+int menu_default_disk_drive(void);
+int menu_default_disk_prepare_volume(void);
 
 #endif

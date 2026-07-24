@@ -22,8 +22,10 @@
 #include <stdio.h>
 #include <circle/timer.h>
 
-#if defined(RASPI_C64)
+#if defined(RASPI_C64) || defined(RASPI_C64SC)
 #include "bootstat_c64.h"
+#elif defined(RASPI_SCPU64)
+#include "bootstat_scpu64.h"
 #elif defined(RASPI_C128)
 #include "bootstat_c128.h"
 #elif defined(RASPI_VIC20)
@@ -84,6 +86,12 @@ int ViceApp::circle_cycles_per_second() {
 //
 
 bool ViceScreenApp::Initialize(void) {
+  // Circle's non-throwing allocator may return null. Fail before either
+  // boot-lifetime object can be dereferenced.
+  if (mEmulatorCore == nullptr || mNetworkManager == nullptr) {
+    return false;
+  }
+
   if (!ViceApp::Initialize()) {
     return false;
   }
@@ -145,8 +153,11 @@ bool ViceScreenApp::Initialize(void) {
 }
 
 bool ViceScreenApp::StartNetwork(void) {
-  if (mNetworkStarted || mNetworkManager == 0) {
+  if (mNetworkStarted) {
     return true;
+  }
+  if (mNetworkManager == nullptr) {
+    return false;
   }
 
   mNetworkStarted = true;
@@ -397,12 +408,14 @@ bool ViceStdioApp::Initialize(void) {
   EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
                 "boot: emmc ready");
 
-  if (f_mount(&mFileSystemSYS, "SYS:", 1) != FR_OK) {
+  mSYSFileSystemMounted = f_mount(&mFileSystemSYS, "SYS:", 1) == FR_OK;
+  if (!mSYSFileSystemMounted) {
     mLogger.Write(GetKernelName(), LogError, "Cannot mount partition: SYS:");
     return false;
   }
 
-  if (f_mount(&mFileSystemSD, "SD:", 1) != FR_OK) {
+  mSDFileSystemMounted = f_mount(&mFileSystemSD, "SD:", 1) == FR_OK;
+  if (!mSDFileSystemMounted) {
     mLogger.Write(GetKernelName(), LogWarning,
                   "Cannot mount legacy partition alias: SD:");
   }
@@ -440,22 +453,57 @@ bool ViceStdioApp::Initialize(void) {
   if (!mUSBHCII.Initialize()) {
     return false;
   }
+#if RASPPI >= 4
+  // xHCI transaction errors halt an endpoint. Recovery uses synchronous
+  // commands and therefore has to run outside the USB interrupt handler.
+  mUSBHCII.ProcessRecoveries();
+#endif
   EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
                 "boot: usb ready");
-
   return true;
 }
 
-void ViceStdioApp::Cleanup(void) {
+int ViceStdioApp::PrepareSystemShutdown(void) {
+  int status = 0;
+
+  if (CGlueStdioShutdown() != 0) {
+    mLogger.Write(GetKernelName(), LogError, "Cannot close all stdio files");
+    status = -1;
+  }
+
+  for (int i = 0; i < 3; ++i) {
+    static const char *usbVolumes[3] = {"USB:", "USB2:", "USB3:"};
+    if (mUSBFileSystemMounted[i] && f_mount(0, usbVolumes[i], 0) != FR_OK) {
+      mLogger.Write(GetKernelName(), LogError, "Cannot unmount %s",
+                    usbVolumes[i]);
+      status = -1;
+    } else {
+      mUSBFileSystemMounted[i] = false;
+    }
+  }
   if (mUserFileSystemMounted && f_mount(0, "USER:", 0) != FR_OK) {
     mLogger.Write(GetKernelName(), LogError, "Cannot unmount USER:");
+    status = -1;
+  } else {
+    mUserFileSystemMounted = false;
   }
-  if (f_mount(0, "SD:", 0) != FR_OK) {
+  if (mSDFileSystemMounted && f_mount(0, "SD:", 0) != FR_OK) {
     mLogger.Write(GetKernelName(), LogError, "Cannot unmount SD:");
+    status = -1;
+  } else {
+    mSDFileSystemMounted = false;
   }
-  if (f_mount(0, "SYS:", 0) != FR_OK) {
+  if (mSYSFileSystemMounted && f_mount(0, "SYS:", 0) != FR_OK) {
     mLogger.Write(GetKernelName(), LogError, "Cannot unmount SYS:");
+    status = -1;
+  } else {
+    mSYSFileSystemMounted = false;
   }
+  return status;
+}
+
+void ViceStdioApp::Cleanup(void) {
+  PrepareSystemShutdown();
   ViceScreenApp::Cleanup();
 }
 
@@ -473,12 +521,21 @@ int ViceStdioApp::circle_mount_usb(int usb) {
   switch (usb) {
      case 0:
        status = f_mount(&mFileSystemUSB1, "USB:", 1);
+       if (status == FR_OK) {
+         mUSBFileSystemMounted[0] = true;
+       }
        break;
      case 1:
        status = f_mount(&mFileSystemUSB2, "USB2:", 1);
+       if (status == FR_OK) {
+         mUSBFileSystemMounted[1] = true;
+       }
        break;
      case 2:
        status = f_mount(&mFileSystemUSB3, "USB3:", 1);
+       if (status == FR_OK) {
+         mUSBFileSystemMounted[2] = true;
+       }
        break;
      default: return 0;
   }
@@ -495,13 +552,22 @@ int ViceStdioApp::circle_unmount_usb(int usb) {
   int status;
   switch (usb) {
      case 0:
-       status = f_mount(0, "USB:", 1);
+       status = f_mount(0, "USB:", 0);
+       if (status == FR_OK) {
+         mUSBFileSystemMounted[0] = false;
+       }
        break;
      case 1:
-       status = f_mount(0, "USB2:", 1);
+       status = f_mount(0, "USB2:", 0);
+       if (status == FR_OK) {
+         mUSBFileSystemMounted[1] = false;
+       }
        break;
      case 2:
-       status = f_mount(0, "USB3:", 1);
+       status = f_mount(0, "USB3:", 0);
+       if (status == FR_OK) {
+         mUSBFileSystemMounted[2] = false;
+       }
        break;
      default: return 0;
   }

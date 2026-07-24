@@ -1,24 +1,30 @@
 #include "platform/platform.h"
+#include "update/generated/update_path_policy_v1.h"
 
 namespace bmc64 {
 
 namespace {
 
+namespace path_policy = bmx::update::generated_path_policy_v1;
+
+static_assert(path_policy::kMachineKernelBaseCount == 2U,
+              "platform requires pi4 and pi5 kernel bases");
+
 #if RASPPI == 5
-constexpr PlatformDescriptor kPlatform = {
+const PlatformDescriptor kPlatform = {
     "pi5",
     5,
     false,
     true,
-    "kernel_2712.img",
+    path_policy::kMachineKernelBases[1U],
 };
 #else
-constexpr PlatformDescriptor kPlatform = {
+const PlatformDescriptor kPlatform = {
     "pi4",
     4,
     false,
     false,
-    "kernel7l.img",
+    path_policy::kMachineKernelBases[0U],
 };
 #endif
 

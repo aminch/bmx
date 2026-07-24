@@ -29,6 +29,7 @@
 
 #include "crt_pi_idx.h"
 #include "crt_pi_rgb.h"
+#include "third_party/common/circle.h"
 
 #ifndef ALIGN_UP
 #define ALIGN_UP(x,y)  ((x + (y)-1) & ~((y)-1))
@@ -184,22 +185,37 @@ FrameBufferLayer::~FrameBufferLayer() {
   }
 }
 
-void FrameBufferLayer::OGLInit() {
+bool FrameBufferLayer::OGLInit() {
   if (egl_initialized_) {
-     return;
+     return true;
   }
 
   EGLBoolean result;
 
   printf("boot: fbl egl init enter\r\n");
+  printf("boot: fbl egl get display enter\r\n");
   egl_display_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-  assert(egl_display_ != EGL_NO_DISPLAY);
+  if (egl_display_ == EGL_NO_DISPLAY) {
+    printf("boot: fbl egl get display failed\r\n");
+    return false;
+  }
+  printf("boot: fbl egl get display ready %p\r\n", egl_display_);
+  printf("boot: fbl egl initialize enter\r\n");
   result = eglInitialize(egl_display_, NULL, NULL);
-  assert(EGL_FALSE != result);
+  if (result == EGL_FALSE) {
+    printf("boot: fbl egl initialize failed 0x%x\r\n", (unsigned)eglGetError());
+    return false;
+  }
+  printf("boot: fbl egl initialize ready\r\n");
+  printf("boot: fbl egl bind api enter\r\n");
   result = eglBindAPI(EGL_OPENGL_ES_API);
-  assert(EGL_FALSE != result);
+  if (result == EGL_FALSE) {
+    printf("boot: fbl egl bind api failed 0x%x\r\n", (unsigned)eglGetError());
+    return false;
+  }
   egl_initialized_ = true;
   printf("boot: fbl egl init ready\r\n");
+  return true;
 }
 
 void FrameBufferLayer::CreateTexture() {
@@ -300,7 +316,7 @@ void FrameBufferLayer::ConcatShaderDefines(char *dst) {
   }
 }
 
-void FrameBufferLayer::ShaderInit() {
+bool FrameBufferLayer::ShaderInit() {
 
 	// Used to for size to reserve enough space at
 	// beginning of shader for dynamic defines.
@@ -330,7 +346,7 @@ void FrameBufferLayer::ShaderInit() {
                                          -1.0f, -1.0f,  0.0f,  1.0f };
 
   if (shader_init_) {
-      return;
+      return true;
   }
 
   const char *shader_txt;
@@ -392,47 +408,69 @@ void FrameBufferLayer::ShaderInit() {
 
   const GLchar *vshader_source = (const GLchar*) vshader_txt_;
   vshader_ = glCreateShader(GL_VERTEX_SHADER);
+  if (!vshader_) {
+    printf("boot: fbl vertex shader create failed 0x%x\r\n", (unsigned)glGetError());
+    return false;
+  }
   glShaderSource(vshader_, 1, &vshader_source, 0);
   glCompileShader(vshader_);
-  //check("glCompileShader");
-
-//  char log[1024];
-//  strcpy(log,"");
-//  glGetShaderInfoLog(vshader_,sizeof log,NULL,log);
-//  FILE *fp = fopen("shader1.log","w");
-//  fprintf(fp,"%s\n",log);
-//  fclose(fp);
+  GLint status = GL_FALSE;
+  glGetShaderiv(vshader_, GL_COMPILE_STATUS, &status);
+  if (status != GL_TRUE) {
+    char log[1024];
+    log[0] = '\0';
+    glGetShaderInfoLog(vshader_, sizeof log, NULL, log);
+    printf("boot: fbl vertex shader compile failed: %s\r\n", log);
+    return false;
+  }
 
   const GLchar *fshader_source = (const GLchar*) fshader_txt_;
   fshader_ = glCreateShader(GL_FRAGMENT_SHADER);
+  if (!fshader_) {
+    printf("boot: fbl fragment shader create failed 0x%x\r\n", (unsigned)glGetError());
+    return false;
+  }
   glShaderSource(fshader_, 1, &fshader_source, 0);
   glCompileShader(fshader_);
-  //check("glCompileShader2");
-
-//  glGetShaderInfoLog(fshader_,sizeof log,NULL,log);
-//  fp = fopen("shader2.log","w");
-//  fprintf(fp,"%s\n",log);
-//  fclose(fp);
+  status = GL_FALSE;
+  glGetShaderiv(fshader_, GL_COMPILE_STATUS, &status);
+  if (status != GL_TRUE) {
+    char log[1024];
+    log[0] = '\0';
+    glGetShaderInfoLog(fshader_, sizeof log, NULL, log);
+    printf("boot: fbl fragment shader compile failed: %s\r\n", log);
+    return false;
+  }
 
   shader_program_ = glCreateProgram();
+  if (!shader_program_) {
+    printf("boot: fbl shader program create failed 0x%x\r\n", (unsigned)glGetError());
+    return false;
+  }
   glAttachShader(shader_program_, vshader_);
   glAttachShader(shader_program_, fshader_);
   glLinkProgram(shader_program_);
-  //check("linkProgram");
-
-//  GLint status;
-//  glGetProgramiv (shader_program_, GL_LINK_STATUS, &status);
-//  if (status != GL_TRUE) {
-//	  glGetProgramInfoLog(shader_program_,sizeof log,NULL,log);
-//	  fp = fopen("program.log","w");
-//	  fprintf(fp,"%s\n",log);
-//	  fclose(fp);
-//  }
+  status = GL_FALSE;
+  glGetProgramiv (shader_program_, GL_LINK_STATUS, &status);
+  if (status != GL_TRUE) {
+    char log[1024];
+    log[0] = '\0';
+    glGetProgramInfoLog(shader_program_, sizeof log, NULL, log);
+    printf("boot: fbl shader link failed: %s\r\n", log);
+    return false;
+  }
 
   glUseProgram (shader_program_);
 
-  attr_vertex_ = glGetAttribLocation(shader_program_, "VertexCoord");
-  attr_texcoord_ = glGetAttribLocation(shader_program_, "TexCoord");
+  GLint attr_vertex = glGetAttribLocation(shader_program_, "VertexCoord");
+  GLint attr_texcoord = glGetAttribLocation(shader_program_, "TexCoord");
+  if (attr_vertex < 0 || attr_texcoord < 0) {
+    printf("boot: fbl shader attrib lookup failed vertex %d texcoord %d\r\n",
+           (int)attr_vertex, (int)attr_texcoord);
+    return false;
+  }
+  attr_vertex_ = (GLuint)attr_vertex;
+  attr_texcoord_ = (GLuint)attr_texcoord;
   texture_sampler_ = glGetUniformLocation(shader_program_, "Texture");
   if (mode_ == VC_IMAGE_8BPP) {
      palette_sampler_ = glGetUniformLocation(shader_program_, "Palette");
@@ -468,6 +506,7 @@ void FrameBufferLayer::ShaderInit() {
   glGenBuffers(1, &vbo_);
 
   shader_init_ = true;
+  return true;
 }
 
 void FrameBufferLayer::ShaderDestroy() {
@@ -721,13 +760,26 @@ int FrameBufferLayer::Allocate(int pixelmode, uint8_t **pixels,
   };
 
   if (uses_shader_) {
-     OGLInit();
+     if (!OGLInit()) {
+       printf("boot: fbl disabling shader after egl init failure\r\n");
+       uses_shader_ = false;
+       return -1;
+     }
      result = eglChooseConfig(egl_display_, attribute_list,
                                &egl_config_, 1, &num_config);
-     assert(EGL_FALSE != result);
+     if (result == EGL_FALSE || num_config < 1) {
+       printf("boot: fbl egl choose config failed result %d count %d err 0x%x\r\n",
+              (int)result, (int)num_config, (unsigned)eglGetError());
+       uses_shader_ = false;
+       return -1;
+     }
      egl_context_ = eglCreateContext(egl_display_, egl_config_,
                                         EGL_NO_CONTEXT, context_attributes);
-     assert(egl_context_ != EGL_NO_CONTEXT);
+     if (egl_context_ == EGL_NO_CONTEXT) {
+       printf("boot: fbl egl create context failed 0x%x\r\n", (unsigned)eglGetError());
+       uses_shader_ = false;
+       return -1;
+     }
   }
 
   return 0;
@@ -941,25 +993,54 @@ void FrameBufferLayer::Show() {
   assert( ret == 0 );
 
   if (uses_shader_) {
+    bool shader_ready = false;
     egl_native_window_.element = dispman_element_;
     egl_native_window_.width = display_width_;
     egl_native_window_.height = display_height_;
     egl_surface_ = eglCreateWindowSurface(egl_display_, egl_config_, &egl_native_window_, NULL );
-    assert(egl_surface_ != EGL_NO_SURFACE);
+    if (egl_surface_ == EGL_NO_SURFACE) {
+      printf("boot: fbl egl create window surface failed 0x%x\r\n",
+             (unsigned)eglGetError());
+    } else {
+      EGLBoolean result;
+      result = eglMakeCurrent(egl_display_, egl_surface_, egl_surface_, egl_context_);
+      if (result == EGL_FALSE) {
+        printf("boot: fbl egl make current failed 0x%x\r\n", (unsigned)eglGetError());
+      } else if (ShaderInit()) {
+        ShaderUpdate();
 
-    EGLBoolean result;
-    result = eglMakeCurrent(egl_display_, egl_surface_, egl_surface_, egl_context_);
-    assert(EGL_FALSE != result);
-    //check("eglMakeCurrent");
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
 
-    ShaderInit();
-    ShaderUpdate();
+        eglSwapInterval(egl_display_, 0);
+        eglSwapBuffers(egl_display_, egl_surface_);
+        shader_ready = true;
+      }
+    }
 
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    eglSwapInterval(egl_display_, 0);
-    eglSwapBuffers(egl_display_, egl_surface_);
+    if (!shader_ready) {
+      printf("boot: fbl shader show failed; falling back to dispmanx\r\n");
+      if (egl_surface_ != EGL_NO_SURFACE) {
+        eglMakeCurrent(egl_display_, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_context_);
+        eglDestroySurface(egl_display_, egl_surface_);
+        egl_surface_ = EGL_NO_SURFACE;
+      }
+      dispman_update = vc_dispmanx_update_start(0);
+      if (dispman_update) {
+        ret = vc_dispmanx_element_remove(dispman_update, dispman_element_);
+        if (ret != 0) {
+          printf("boot: fbl fallback remove failed %d\r\n", ret);
+        }
+        ret = vc_dispmanx_update_submit(dispman_update, NULL, NULL);
+        if (ret != 0) {
+          printf("boot: fbl fallback submit failed %d\r\n", ret);
+        }
+      }
+      showing_ = false;
+      uses_shader_ = false;
+      Show();
+      return;
+    }
   }
 
   if (mode_ == VC_IMAGE_8BPP) {
@@ -975,7 +1056,7 @@ void FrameBufferLayer::Show() {
 
   FrameReady(0);
   showing_ = true;
-  SwapResources(false, this, nullptr);
+  PresentLayer(false, this);
 }
 
 void FrameBufferLayer::Hide() {
@@ -1098,35 +1179,77 @@ void FrameBufferLayer::RenderGL() {
 }
 
 
-// Static
-void FrameBufferLayer::SwapResources(bool sync,
-                                     FrameBufferLayer* fb1,
-                                     FrameBufferLayer* fb2) {
+void FrameBufferLayer::PresentLayer(bool sync, FrameBufferLayer *layer) {
+  if (!layer) {
+    return;
+  }
+
+  FrameBufferLayer *layers[] = { layer };
+  PresentLayerList(sync, layers, 1);
+}
+
+void FrameBufferLayer::PresentLayers(bool sync, FrameBufferLayer *layers,
+                                     uint32_t ready_mask) {
+  FrameBufferLayer *ready_layers[FB_NUM_LAYERS];
+  unsigned count = 0;
+
+  if (!layers || ready_mask == 0) {
+    return;
+  }
+
+  for (unsigned i = 0; i < FB_NUM_LAYERS; i++) {
+    if (ready_mask & FB_LAYER_MASK(i)) {
+      ready_layers[count++] = &layers[i];
+    }
+  }
+
+  PresentLayerList(sync, ready_layers, count);
+}
+
+void FrameBufferLayer::PresentLayerList(bool sync, FrameBufferLayer **layers,
+                                        unsigned count) {
   static bool first_sync_swap_logged = false;
+  bool dispman_swap_will_sync = false;
+  bool gl_sync_done = false;
+
+  if (!layers || count == 0) {
+    return;
+  }
 
   // We need to know whether the dispmanx code below
   // is actually going to cause a sync. It turns out if we
-  // don't actually change resources on either fb1 or fb2,
+  // don't actually change resources on any layer,
   // the start/submit doesn't perform the sync.  So we
   // predict what will happen based on the same conditions
   // in Swap() above. If sync is requested but the code below
   // won't sync, let SwapGL take care of it.
-  bool will_sync = !fb1->UsesShader() && fb1->Showing() &&
-                         (!fb2 || (fb2 && !fb2->UsesShader() && fb2->Showing()));
-  fb1->SwapGL(sync && !will_sync);
+  for (unsigned i = 0; i < count; i++) {
+    if (!layers[i]->UsesShader() && layers[i]->Showing()) {
+      dispman_swap_will_sync = true;
+      break;
+    }
+  }
+
+  for (unsigned i = 0; i < count; i++) {
+    if (layers[i]->UsesShader()) {
+      layers[i]->SwapGL(sync && !dispman_swap_will_sync && !gl_sync_done);
+      if (sync && !dispman_swap_will_sync) {
+        gl_sync_done = true;
+      }
+    }
+  }
 
   if (sync) {
     DISPMANX_UPDATE_HANDLE_T dispman_update;
     dispman_update = vc_dispmanx_update_start(0);
-    fb1->Swap(dispman_update);
-    if (fb2) {
-       fb2->Swap(dispman_update);
+    for (unsigned i = 0; i < count; i++) {
+      layers[i]->Swap(dispman_update);
     }
     vc_dispmanx_update_submit_sync(dispman_update);
     if (!first_sync_swap_logged) {
       first_sync_swap_logged = true;
-      printf("bootprof: %10u us fbl first sync swap layer %d%s\r\n",
-             CTimer::GetClockTicks(), fb1->GetLayer(), fb2 ? " + paired layer" : "");
+      printf("bootprof: %10u us fbl first sync swap %u layer(s)\r\n",
+             CTimer::GetClockTicks(), count);
     }
   }
 }
@@ -1162,15 +1285,16 @@ void FrameBufferLayer::UpdatePalette() {
   assert( ret == 0 );
 
   if (uses_shader_ & shader_init_) {
-     if (transparency_) {
-	  // Not supported yet.
-	  assert(false);
-     } else {
-	  glBindTexture(GL_TEXTURE_2D,pal_);
-	  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 1, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, pal_565_);
-	  RenderGL();
-          SwapResources(false, this, nullptr);
-     }
+    if (transparency_) {
+      // Not supported yet.
+      assert(false);
+    } else {
+      glBindTexture(GL_TEXTURE_2D, pal_);
+      glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 1, GL_RGB,
+                      GL_UNSIGNED_SHORT_5_6_5, pal_565_);
+      RenderGL();
+      PresentLayer(false, this);
+    }
   }
 }
 

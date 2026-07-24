@@ -1,0 +1,79 @@
+Version 2026.07.24
+------------------
+* New features
+  * Added SuperCPU x64 (experimental).
+  * Added x64sc (experimental).
+  * Added a diagnostics screen.
+  * Sound output priority selectable ("HDMI, USB" or "USB, HDMI").
+  * Menu option to reboot and power off the Raspberry Pi.
+  * Autostart and 'Attach disk' remember the last used directory.
+  * Configurable default drive for utils.d64. Utils.d64 can be changed
+    by the user to something else.
+  * Redesigned machine menu.
+  * New machines.ini and optimized internal handling (machines.ini is not
+    compatible with machines.txt!)
+  * Attaching tapes, disks and carts can be mapped to a hotkey.
+  * Disk/Tape content viewer (arrow right: view / arrow left: return)
+  * USB Plug&Play for Gamepads, Keyboards and Mice
+  * Support for online Updates. Uses the same zip file from github that
+    a user would use to manually install BMX. Nothing happens without
+    users knowledge. No popus, no automatic update checks. Everything
+    must be initiated by the user.
+  * Improved file handling for big images (Faster, less memory usage): 
+    Big files are not completely load into memory anymore, but directly 
+    read/written via FatFS.
+
+* Bugfixes
+  * Fixed a Circle bug that broke USB Sound.
+  * PI4: Activating the status bar caused the bottom part of the
+    screen to flicker while the BMX menu is open. Workaround:
+    The status bar is not visible while the BMX menu is open.
+  * Rendering of the visible layers (vic, vdc, menu, status)
+    was not synchronized.
+  * Scaling interpolation wrongly showed "Use , and . for -/+1
+    increment".
+  * An activated drive 9 can cause software incompatibilities.
+  * File/directory listing was slow due to unneccessary calls to stat()
+    for each entry (FatFs entry attributes are now reused)
+  * 8bitDo V2 Dongle (2dc8:3106) was not connectet to the XBox-360 driver.
+  * 8bitDo V1&V2 were not correctly initialized.
+  * 8bitDo V2 needs USB Plug&Play to function properly.
+  * Fixed memory leaks in new_io
+  * Fixed a memory leak in PI5KMS framebuffer, which can cause crashes.
+
+
+Version 2026.07.03
+------------------
+Initial release
+
+* Core features:
+  * Based on VICE 3.10 (C64, C128, VIC20, Plus/4 and PET machines are supported)
+  * Circle v20, Step 51 to support the Raspberry Pi4/5 family
+  * Pi5/Pi500 HDMI modesetting with RGB565 framebuffer and hardware scaling, 
+    providing HDMI resolution switching, which is currently not supported in 
+    Circle.
+  * Integrated network support (Ethernet/Wi-Fi)
+  * Added a popup screen to select available Wi-Fi access points
+  * Integrated RS232 over TCP/IP (think connecting two computers with an 
+    emulated RS232 cable over an internet connection)
+  * RS232 supports Userport, UP9600/EZ232 and Swift/Turbo Interfaces
+  * Ported tcpser-based Hayes-Modem connected to the RS232 interface (within a 
+    terminal you can call a BBS like this: "ATDTbmxbbs.de:6510")
+  * Added authentic sound options for the Hayes modem
+  * Added support for a user selectable phonebook for BBS connections which can 
+    be dialed using the "ATDT" command within a terminal (e.g. ATDT0, ATDTMYBBS 
+    or ATDT515123456). The format of the .pb file is: `shortcut=addr`, 
+    e.g. `0=bmxbbs.de:6510`
+  * Improvements and bug fixes in the networking stack
+  * Support for two partitions on the SD card (a mandatory system/boot partition
+    and an optional user partition for disk images, phonebooks etc.)
+  * Added support for a C64 utility disk, which is automatically inserted in 
+    drive 9 directly after boot. Utility disks for the other machines do not 
+    exist yet.
+  * The C64 utility disk currently only contains the terminal program "ccgms", 
+    modified to default to modem type "Swift/Turbo DE". Enable networking and 
+    RS232 in the BMX menu, load ccgms (`LOAD "ccgms",9,1` followed by `RUN`), 
+    and you can call a BBS without changing any terminal settings.
+  * With the release of the first BMX version a dedicated bbs (bmxbbs.de:6510) 
+    was launched. It is the default BBS, which is called when you enter "ATDT" 
+    (without any "number") in a terminal program.

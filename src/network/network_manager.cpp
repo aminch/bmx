@@ -32,6 +32,7 @@ struct emux_wifi_ap {
 namespace {
 
 CNetSubSystem *g_menuNetwork = 0;
+bool g_networkFeatureEnabled = false;
 char g_networkDiskVolume[16] = "SD";
 CBcm4343Device *g_scanWLAN = 0;
 bool g_scanWLANRequiresReboot = false;
@@ -385,6 +386,7 @@ NetworkManager::~NetworkManager(void) {
   if (g_menuNetwork == m_net) {
     g_menuNetwork = 0;
   }
+  g_networkFeatureEnabled = false;
   delete m_wpaSupplicant;
   m_wpaSupplicant = 0;
   delete m_wlan;
@@ -399,6 +401,7 @@ bool NetworkManager::Initialize(const ViceOptions &options) {
            options.GetDiskVolume());
 
   TBmxNetworkAdapter adapter = options.GetNetworkAdapter();
+  g_networkFeatureEnabled = adapter != BMX_NETWORK_OFF;
   if (adapter == BMX_NETWORK_OFF) {
     if (options.Rs232NetEnabled()) {
       BMC64_NET_EVENT("disabled; RS232 requires Ethernet or WiFi");
@@ -528,6 +531,23 @@ void NetworkManager::RunConnectTest(const ViceOptions &options) {
                         options.GetNetworkTestPort());
 }
 
+CNetSubSystem *GetActiveNetworkSubsystem(void) {
+  if (!g_networkFeatureEnabled || g_menuNetwork == 0 ||
+      !g_menuNetwork->IsRunning()) {
+    return 0;
+  }
+  return g_menuNetwork;
+}
+
+bool ReadNetworkFeatureState(bool *feature_enabled, bool *ready) {
+  if (feature_enabled == 0 || ready == 0) {
+    return false;
+  }
+  *feature_enabled = g_networkFeatureEnabled;
+  *ready = g_menuNetwork != 0 && g_menuNetwork->IsRunning();
+  return true;
+}
+
 } // namespace bmx
 
 extern "C" int emux_get_network_addresses(char *ip, int ipLen,
@@ -633,7 +653,8 @@ extern "C" int emux_wifi_scan_requires_reboot(void) {
 }
 
 extern "C" int emux_network_is_ready(void) {
-  return g_menuNetwork != 0 && g_menuNetwork->IsRunning();
+  return g_networkFeatureEnabled && g_menuNetwork != 0 &&
+         g_menuNetwork->IsRunning();
 }
 
 extern "C" int emux_network_socket_close(int fd) {

@@ -49,15 +49,21 @@ extern int overlay_dirty;
 
 extern int statusbar_enabled;
 extern int statusbar_showing;
+extern int diagnostics_showing;
 
 uint8_t *overlay_init(int padding, int c40_80_state, int vkbd_transparency);
 void overlay_check(void);
+int overlay_status_layer_suppressed(void);
 void overlay_activate(void);
 void overlay_warp_changed(int warp);
 void overlay_joyswap_changed(int swap);
 void overlay_statusbar_dismiss(void);
 void overlay_statusbar_enable(void);
 void overlay_statusbar_disable(void);
+void overlay_diagnostics_set_mode(int mode);
+int overlay_diagnostics_get_mode(void);
+void overlay_diagnostics_set_frame_stats(unsigned fps_milli,
+                                         unsigned core_busy_milli);
 void overlay_change_padding(int padding);
 void overlay_change_vkbd_transparency(int transparency);
 void overlay_40_80_columns_changed(int value);

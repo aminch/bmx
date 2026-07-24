@@ -21,44 +21,35 @@ extern int errno;
 
 #include <ff.h>
 
-// This is a replacement io.cpp specifically for BMC64.
-// This implementation will sometimes load the entire file
-// into memory to provide faster seek operations, improving
-// performance on slow SD cards.  Since any file the emulator
-// attempts to load is relatively small (<200k), this works out
-// just fine for our needs. Obviously, this would not be a
-// viable solution for most other circumstances.  It also
-// works around an issue with circle/fatfs integration that
-// was causing memory corruption.
+// This is a replacement io.cpp specifically for BMX. Small files can be
+// cached in memory to keep seek-heavy VICE media fast on slow SD cards. The
+// cache is capped at Circle's largest reusable heap bucket so closing a file
+// cannot permanently consume low heap. Larger files remain FatFs-backed and
+// use direct seek/read/write operations.
 //
 // When a file is opened for READ ONLY, fatfs is used to open
 // the file.  As long as the client never seeks, the file will
 // not be loaded into ram and the disk still backs the data.  As
-// soon as seek is called, the file will be loaded into ram and
-// from then on, ram backs the data.  NOTE the fatfs file remains
-// open even after the file is loaded into ram in this case. If
-// the client never calls seek, the data will be read from fatfs.
+// soon as seek is called, a small file will be loaded into RAM and from then
+// on RAM backs the data. Large files always remain FatFs-backed. The FatFs
+// handle remains open in both cases.
 //
-// When a file is opened for WRITE ONLY, fatfs is used to create
-// the file. However, all write operations write to ram and only
-// when the file is finally closed will the data be dumped to
-// the fat fs filesystem.  The fatfs file remains open during
-// the entire time between open/close.  Seek is technically
-// supported in this case but attempting to seek past the
-// current file size is not.  Call to fstat on a file in WRTE_ONLY
-// mode will not work as expected.
+// Newly truncated write-only files start in the bounded cache. If they grow
+// past the limit, their contents are spilled once and subsequent I/O is
+// direct. Other write-only modes use FatFs directly.
 //
-// When a file is opened for READ_WRITE, fat fs is used to
-// immediately load the contents of the existing file into ram.
-// The input fat fs file is immediatly closed in this case.
-// Writes & seeks use the ram copy. Only when the file is closed
-// will the fatfs system be used to create a new file from the ram.
-// Again, seeking past the file's current length is not supported.
+// Read-write files up to the cache limit use the RAM copy. Larger files are
+// never copied in full and all random access goes directly through FatFs.
 
 #define MAX_OPEN_FILES 10
 #define MAX_OPEN_DIRS 10
-#define READ_BUF_SIZE 1024
 #define BMC64_PATH_MAX 256
+#define BMC64_DIRENT_FAT_ATTR_VALID 0x0100
+#define BMC64_FILE_CACHE_LIMIT (512U * 1024U)
+
+#ifndef BMC64_IO_STATS
+#define BMC64_IO_STATS 0
+#endif
 
 static const char *pattern = "*";
 
@@ -327,14 +318,15 @@ struct CircleFile {
   int in_use;
   char fname[BMC64_PATH_MAX];
 
-  char readBuf[READ_BUF_SIZE]; // tmp read buffer
-  char *contents; // bytes for file in memory
-  unsigned allocated; // total bytes allocated for in memory file
-  unsigned size; // total size of file in memory file
-  unsigned position; // current in memory write position
-  int mode; // remembers mode this file was opened under
-  int written_to; // at least one write was performed on this file
-  int fopen_called; // f_open was called and thus f_close needs to be called
+  char *contents;       // bytes for a bounded in-memory file
+  unsigned allocated;  // bytes allocated for contents
+  unsigned size;       // logical file size
+  unsigned position;   // logical file position
+  int mode;            // O_RDONLY, O_WRONLY, or O_RDWR
+  int flags;           // complete open flags
+  int written_to;      // at least one write was performed
+  int cached;          // contents/position back I/O instead of FIL
+  int fopen_called;    // FIL is open and must be closed
 };
 
 struct CircleDir {
@@ -352,6 +344,9 @@ struct CircleDir {
 
 CircleFile fileTab[MAX_OPEN_FILES];
 CircleDir dirTab[MAX_OPEN_DIRS];
+static CGlueIOStats g_ioStats;
+
+extern "C" int _close(int fildes);
 
 void CGlueStdioInit(CSerialDevice *serial) {
   g_serial = serial;
@@ -364,6 +359,25 @@ void CGlueStdioInit(CSerialDevice *serial) {
   fileTab[2].in_use = 1;
 
   copy_string(currentDir, sizeof currentDir, "/");
+  CGlueStdioResetIOStats();
+}
+
+void CGlueStdioGetIOStats(CGlueIOStats *stats) {
+  if (stats != nullptr) {
+    *stats = g_ioStats;
+  }
+}
+
+void CGlueStdioResetIOStats(void) {
+  memset(&g_ioStats, 0, sizeof g_ioStats);
+#if BMC64_IO_STATS
+  for (unsigned int i = 3; i < MAX_OPEN_FILES; ++i) {
+    if (fileTab[i].in_use) {
+      ++g_ioStats.open_files;
+    }
+  }
+  g_ioStats.peak_open_files = g_ioStats.open_files;
+#endif
 }
 
 static int g_bootStatNum = 0;
@@ -380,6 +394,27 @@ void CGlueStdioInitBootStat (int num,
    g_bootStatWhat = bootStatWhat;
    g_bootStatFile = bootStatFile;
    g_bootStatSize = bootStatSize;
+}
+
+int CGlueStdioShutdown(void) {
+  int errors = 0;
+
+  fflush(nullptr);
+
+  for (unsigned int i = 3; i < MAX_OPEN_FILES; ++i) {
+    if (fileTab[i].in_use && _close(i) != 0) {
+      ++errors;
+    }
+  }
+
+  for (unsigned int i = 0; i < MAX_OPEN_DIRS; ++i) {
+    if (dirTab[i].in_use && f_closedir(&dirTab[i].dir) != FR_OK) {
+      ++errors;
+    }
+    dirTab[i].in_use = 0;
+  }
+
+  return errors == 0 ? 0 : -1;
 }
 
 static int FindFreeFileSlot(void) {
@@ -403,18 +438,133 @@ static char *strdup2(const char *s) {
   return d;
 }
 
+static void set_fatfs_errno(FRESULT result) {
+  switch (result) {
+    case FR_NO_FILE:
+    case FR_INVALID_NAME:
+      errno = ENOENT;
+      break;
+    case FR_NO_PATH:
+    case FR_INVALID_DRIVE:
+      errno = ENOTDIR;
+      break;
+    case FR_EXIST:
+      errno = EEXIST;
+      break;
+    case FR_NOT_ENOUGH_CORE:
+      errno = ENOMEM;
+      break;
+    case FR_TOO_MANY_OPEN_FILES:
+      errno = ENFILE;
+      break;
+    case FR_DENIED:
+    case FR_WRITE_PROTECTED:
+      errno = EACCES;
+      break;
+    case FR_INVALID_OBJECT:
+      errno = EBADF;
+      break;
+    default:
+      errno = EIO;
+      break;
+  }
+}
+
+static FRESULT measured_seek(FIL *file, FSIZE_t offset) {
+#if BMC64_IO_STATS
+  const uint64_t begin = CTimer::GetClockTicks64();
+#endif
+  const FRESULT result = f_lseek(file, offset);
+#if BMC64_IO_STATS
+  const uint64_t elapsed = CTimer::GetClockTicks64() - begin;
+  ++g_ioStats.seek_calls;
+  g_ioStats.seek_us += elapsed;
+  if (elapsed > g_ioStats.seek_max_us) g_ioStats.seek_max_us = elapsed;
+  if (result != FR_OK) ++g_ioStats.io_errors;
+#endif
+  return result;
+}
+
+static FRESULT measured_read(FIL *file, void *buffer, UINT bytes,
+                             UINT *bytes_read) {
+#if BMC64_IO_STATS
+  const uint64_t begin = CTimer::GetClockTicks64();
+#endif
+  const FRESULT result = f_read(file, buffer, bytes, bytes_read);
+#if BMC64_IO_STATS
+  const uint64_t elapsed = CTimer::GetClockTicks64() - begin;
+  ++g_ioStats.read_calls;
+  if (result == FR_OK) g_ioStats.read_bytes += *bytes_read;
+  else ++g_ioStats.io_errors;
+  g_ioStats.read_us += elapsed;
+  if (elapsed > g_ioStats.read_max_us) g_ioStats.read_max_us = elapsed;
+#endif
+  return result;
+}
+
+static FRESULT measured_write(FIL *file, const void *buffer, UINT bytes,
+                              UINT *bytes_written) {
+#if BMC64_IO_STATS
+  const uint64_t begin = CTimer::GetClockTicks64();
+#endif
+  const FRESULT result = f_write(file, buffer, bytes, bytes_written);
+#if BMC64_IO_STATS
+  const uint64_t elapsed = CTimer::GetClockTicks64() - begin;
+  ++g_ioStats.write_calls;
+  if (result == FR_OK) g_ioStats.write_bytes += *bytes_written;
+  else ++g_ioStats.io_errors;
+  g_ioStats.write_us += elapsed;
+  if (elapsed > g_ioStats.write_max_us) g_ioStats.write_max_us = elapsed;
+#endif
+  return result;
+}
+
+static bool sync_file(CircleFile &file) {
+#if BMC64_IO_STATS
+  ++g_ioStats.sync_calls;
+#endif
+  const FRESULT result = f_sync(&file.file);
+  if (result == FR_OK) return true;
+#if BMC64_IO_STATS
+  ++g_ioStats.io_errors;
+#endif
+  set_fatfs_errno(result);
+  return false;
+}
+
+static void note_file_open() {
+#if BMC64_IO_STATS
+  ++g_ioStats.open_files;
+  if (g_ioStats.open_files > g_ioStats.peak_open_files) {
+    g_ioStats.peak_open_files = g_ioStats.open_files;
+  }
+#endif
+}
+
+static void note_file_close(int fildes) {
+#if BMC64_IO_STATS
+  if (fildes >= 3 && g_ioStats.open_files > 0) --g_ioStats.open_files;
+#else
+  (void) fildes;
+#endif
+}
+
 static int ensure_file_capacity(CircleFile &file, unsigned required) {
   if (required <= file.allocated) {
     return 0;
   }
+  if (required > BMC64_FILE_CACHE_LIMIT) {
+    errno = EFBIG;
+    return -1;
+  }
 
-  unsigned new_allocated = file.allocated ? file.allocated : READ_BUF_SIZE;
+  unsigned new_allocated = file.allocated ? file.allocated : 1024U;
   while (new_allocated < required) {
-    if (new_allocated > UINT_MAX / 2) {
-      errno = ENOMEM;
-      return -1;
+    if (new_allocated > BMC64_FILE_CACHE_LIMIT / 2U) {
+      new_allocated = BMC64_FILE_CACHE_LIMIT;
+    } else {
+      new_allocated *= 2U;
     }
-    new_allocated *= 2;
   }
 
   char *new_contents;
@@ -434,14 +584,12 @@ static int ensure_file_capacity(CircleFile &file, unsigned required) {
   return 0;
 }
 
-static void discard_file_contents(CircleFile &file) {
+static void release_file_contents(CircleFile &file) {
   if (file.contents != nullptr) {
     free(file.contents);
     file.contents = nullptr;
   }
   file.allocated = 0;
-  file.size = 0;
-  file.position = 0;
 }
 
 
@@ -467,46 +615,139 @@ static CircleDir *FindCircleDirFromDIR(DIR *dir) {
   return nullptr;
 }
 
-// Returns non zero value on any failure. Any memory will be
-// freed on error and file.contents nulled.
-static int slurp_file(CircleFile &file) {
-  if (file.contents == nullptr) {
-    // Read the entire contents of the file into memory.
-    file.size = 0;
-    unsigned total = 0;
-    if (f_lseek(&file.file, 0) != FR_OK) {
-       errno = EIO;
-       return -1;
+static bool read_exact(FIL *file, char *buffer, unsigned size) {
+  unsigned received = 0;
+  while (received < size) {
+    UINT count = 0;
+    const UINT request = static_cast<UINT>(size - received);
+    const FRESULT result =
+        measured_read(file, buffer + received, request, &count);
+    if (result != FR_OK) {
+      set_fatfs_errno(result);
+      return false;
     }
-    while (true) {
-      unsigned int num_read;
-      if (f_read(&file.file, file.readBuf, READ_BUF_SIZE, &num_read) != FR_OK) {
-        discard_file_contents(file);
-        errno = EIO;
-        return -1;
-      }
+    if (count == 0) {
+      errno = EIO;
+      return false;
+    }
+    received += count;
+  }
+  return true;
+}
 
-      if (num_read == 0) {
-        break;
-      }
+static bool write_exact(FIL *file, const char *buffer, unsigned size) {
+  unsigned written = 0;
+  while (written < size) {
+    UINT count = 0;
+    const UINT request = static_cast<UINT>(size - written);
+    const FRESULT result =
+        measured_write(file, buffer + written, request, &count);
+    if (result != FR_OK) {
+      set_fatfs_errno(result);
+      return false;
+    }
+    if (count == 0) {
+      errno = EIO;
+      return false;
+    }
+    written += count;
+  }
+  return true;
+}
 
-      if (num_read > UINT_MAX - total) {
-        discard_file_contents(file);
-        errno = ENOMEM;
-        return -1;
-      }
+// Cache a known-small file with one allocation. The logical position is
+// preserved; only the FatFs position is changed while filling the cache.
+static bool cache_file(CircleFile &file) {
+  if (file.cached) return true;
+  if (file.size > BMC64_FILE_CACHE_LIMIT) return false;
 
-      if (ensure_file_capacity(file, total + num_read) != 0) {
-        discard_file_contents(file);
-        return -1;
-      }
+#if BMC64_IO_STATS
+  const uint64_t begin = CTimer::GetClockTicks64();
+  ++g_ioStats.cached_open_calls;
+  if (file.size != 0) ++g_ioStats.slurp_calls;
+#endif
 
-      memcpy(file.contents + total, file.readBuf, num_read);
-      total += num_read;
-      file.size = total;
+  char *contents = nullptr;
+  if (file.size != 0) {
+    contents = static_cast<char *>(malloc(file.size));
+    if (contents == nullptr) {
+      errno = ENOMEM;
+      return false;
+    }
+    if (measured_seek(&file.file, 0) != FR_OK ||
+        !read_exact(&file.file, contents, file.size)) {
+      free(contents);
+      if (errno == 0) errno = EIO;
+      return false;
     }
   }
-  return 0;
+
+  file.contents = contents;
+  file.allocated = file.size;
+  file.cached = 1;
+#if BMC64_IO_STATS
+  const uint64_t elapsed = CTimer::GetClockTicks64() - begin;
+  if (file.size != 0) {
+    g_ioStats.slurp_bytes += file.size;
+    g_ioStats.slurp_us += elapsed;
+    if (elapsed > g_ioStats.slurp_max_us) g_ioStats.slurp_max_us = elapsed;
+  }
+#endif
+  return true;
+}
+
+static bool flush_cached_file(CircleFile &file) {
+  if (!file.cached || !file.written_to) return true;
+  if (measured_seek(&file.file, 0) != FR_OK) {
+    errno = EIO;
+    return false;
+  }
+  if (file.size != 0 && !write_exact(&file.file, file.contents, file.size)) {
+    return false;
+  }
+  if (measured_seek(&file.file, file.size) != FR_OK) {
+    errno = EIO;
+    return false;
+  }
+  const FRESULT truncate_result = f_truncate(&file.file);
+  if (truncate_result != FR_OK) {
+    set_fatfs_errno(truncate_result);
+    return false;
+  }
+  return sync_file(file);
+}
+
+static bool spill_cache(CircleFile &file) {
+  if (!file.cached) return true;
+  if (!flush_cached_file(file)) return false;
+  release_file_contents(file);
+  file.cached = 0;
+  if (measured_seek(&file.file, file.position) != FR_OK) {
+    errno = EIO;
+    return false;
+  }
+#if BMC64_IO_STATS
+  ++g_ioStats.cache_spills;
+  ++g_ioStats.direct_open_calls;
+#endif
+  return true;
+}
+
+static BYTE fatfs_open_flags(int flags, int mode) {
+  BYTE result = mode == O_RDONLY
+                    ? FA_READ
+                    : mode == O_WRONLY ? FA_WRITE : FA_READ | FA_WRITE;
+
+  if (flags & O_APPEND) {
+    result |= FA_OPEN_APPEND;
+  } else if ((flags & O_CREAT) && (flags & O_EXCL)) {
+    result |= FA_CREATE_NEW;
+  } else if (flags & O_TRUNC) {
+    result |= FA_CREATE_ALWAYS;
+  } else if (flags & O_CREAT) {
+    result |= FA_OPEN_ALWAYS;
+  }
+  return result;
 }
 
 extern "C" int _open(char *file, int flags, int mode) {
@@ -516,7 +757,7 @@ extern "C" int _open(char *file, int flags, int mode) {
     return -1;
   }
 
-  int const masked_flags = flags & 7;
+  int const masked_flags = flags & O_ACCMODE;
   if (masked_flags != O_RDONLY && masked_flags != O_WRONLY &&
       masked_flags != O_RDWR) {
     errno = ENOSYS;
@@ -542,30 +783,23 @@ extern "C" int _open(char *file, int flags, int mode) {
     }
 
     CircleFile &newFile = fileTab[slot];
+    memset(&newFile.file, 0, sizeof newFile.file);
     newFile.fopen_called = 0;
     newFile.contents = nullptr;
     newFile.position = 0;
     newFile.size = 0;
     newFile.allocated = 0;
     newFile.mode = masked_flags;
+    newFile.flags = flags;
     newFile.written_to = 0;
+    newFile.cached = 0;
     newFile.fname[0] = '\0';
 
-    int result;
-    if (masked_flags == O_RDONLY) {
-      result = f_open(&newFile.file, circlePath.path, FA_READ);
-    } else if (masked_flags == O_WRONLY) {
-      result = f_open(&newFile.file, circlePath.path, 
-         FA_WRITE | FA_CREATE_ALWAYS);
-    } else {
-      assert(masked_flags == O_RDWR);
-      // Note: We open read only because this will be slurped and changed
-      // in memory.
-      result = f_open(&newFile.file, circlePath.path, FA_READ);
-    }
-
+    const FRESULT result = f_open(
+        &newFile.file, circlePath.path,
+        fatfs_open_flags(flags, masked_flags));
     if (result != FR_OK) {
-      errno = EACCES;
+      set_fatfs_errno(result);
       return -1;
     }
 
@@ -576,27 +810,40 @@ extern "C" int _open(char *file, int flags, int mode) {
       return -1;
     }
 
-    // When file is opened O_RDWR, slurp it into memory.
-    if (masked_flags == O_RDWR) {
-       if (slurp_file(newFile)) {
-          f_close(&newFile.file);
-          discard_file_contents(newFile);
-          newFile.fopen_called = 0;
-          if (errno == 0) {
-            errno = ENFILE;
-          }
-          return -1;
-       }
-       if (f_close(&newFile.file) != FR_OK) {
-          discard_file_contents(newFile);
-          newFile.fopen_called = 0;
-          errno = ENFILE;
-          return -1;
-       }
-       newFile.fopen_called = 0;
+    const FSIZE_t fatfs_size = f_size(&newFile.file);
+    if (fatfs_size > static_cast<FSIZE_t>(UINT_MAX)) {
+      f_close(&newFile.file);
+      newFile.fopen_called = 0;
+      errno = EFBIG;
+      return -1;
+    }
+    newFile.size = static_cast<unsigned>(fatfs_size);
+    if (flags & O_APPEND) {
+      newFile.position = newFile.size;
     }
 
+    const bool cache_read_write =
+        masked_flags == O_RDWR &&
+        newFile.size <= BMC64_FILE_CACHE_LIMIT;
+    const bool cache_truncated_write =
+        masked_flags == O_WRONLY && (flags & O_TRUNC) != 0;
+    if ((cache_read_write || cache_truncated_write) &&
+        !cache_file(newFile)) {
+      f_close(&newFile.file);
+      release_file_contents(newFile);
+      newFile.fopen_called = 0;
+      return -1;
+    }
+#if BMC64_IO_STATS
+    if (!newFile.cached &&
+        (newFile.size > BMC64_FILE_CACHE_LIMIT ||
+         masked_flags != O_RDONLY)) {
+      ++g_ioStats.direct_open_calls;
+    }
+#endif
+
     newFile.in_use = 1;
+    note_file_open();
   } else {
     errno = ENFILE;
   }
@@ -616,56 +863,33 @@ extern "C" int _close(int fildes) {
     return -1;
   }
 
-  int flush_error = 0;
-  if (file.contents) {
-     // Only open if something was actually written to memory
-     if (file.mode == O_RDWR && file.written_to) {
-        // Assert FIL is not used
-        file.fopen_called = 1;
-        if (f_open(&file.file, file.fname,
-                      FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
-           // We won't be able to flush in memory changes back to disk.
-           file.fopen_called = 0;
-           flush_error = 1;
-        }
-     }
-
-     // Always flush to disk for WRONLY but only if written to for RDRW
-     if (!flush_error &&
-         ((file.mode == O_RDWR && file.written_to) || file.mode == O_WRONLY)) {
-        // Dump contents of memory buffer to actual file.
-        unsigned int num_written;
-        if (f_write(&file.file, file.contents,
-                      file.size, &num_written) != FR_OK ||
-             num_written != file.size) {
-           // Can't write new file or modified file contents back to disk.
-           flush_error = 1;
-        }
-     }
+  bool ok = file.cached ? flush_cached_file(file)
+                        : !file.written_to || sync_file(file);
+  int saved_errno = ok ? 0 : errno;
+  if (file.fopen_called) {
+    const FRESULT result = f_close(&file.file);
+    if (result != FR_OK) {
+      if (ok) set_fatfs_errno(result);
+      saved_errno = errno;
+      ok = false;
+    }
   }
 
-  int need_close = file.fopen_called;
-
+  release_file_contents(file);
   file.allocated = 0;
   file.size = 0;
+  file.position = 0;
   file.mode = 0;
+  file.flags = 0;
   file.in_use = 0;
+  note_file_close(fildes);
   file.written_to = 0;
+  file.cached = 0;
   file.fopen_called = 0;
   file.fname[0] = '\0';
 
-  if (file.contents) {
-    free(file.contents);
-    file.contents = nullptr;
-  } 
-  
-  // If we opened for RDWR but never wrote, nothing do to.
-  if (need_close && f_close(&file.file) != FR_OK) {
-    flush_error = 1;
-  }
-
-  if (flush_error) {
-    errno = EIO;
+  if (!ok) {
+    errno = saved_errno == 0 ? EIO : saved_errno;
     return -1;
   }
 
@@ -691,15 +915,17 @@ extern "C" int _read(int fildes, char *ptr, int len) {
     errno = EBADF;
     return -1;
   }
+  if (file.mode == O_WRONLY) {
+    errno = EBADF;
+    return -1;
+  }
 
   unsigned int num_read;
-  if (file.contents == nullptr) {
-     // Assert file.FIL has been opened
-     // else EBADF -1
-
-     // Read data from the file
-     if (f_read(&file.file, ptr, len, &num_read) != FR_OK) {
-       errno = EIO;
+  if (!file.cached) {
+     const FRESULT result = measured_read(
+         &file.file, ptr, static_cast<UINT>(len), &num_read);
+     if (result != FR_OK) {
+       set_fatfs_errno(result);
        return -1;
      }
 
@@ -749,28 +975,54 @@ extern "C" int _write(int fildes, char *ptr, int len) {
     errno = EBADF;
     return -1;
   }
+  if (file.mode == O_RDONLY) {
+    errno = EBADF;
+    return -1;
+  }
+  if (len == 0) return 0;
 
-  // Mark this dirty so it will be flushed from memory to disk on close
-  file.written_to = 1;
+  if (file.flags & O_APPEND) {
+    file.position = file.size;
+    if (!file.cached && measured_seek(&file.file, file.position) != FR_OK) {
+      errno = EIO;
+      return -1;
+    }
+  }
 
-  // Nothing allocated yet? Allocate now.
   if ((unsigned)len > UINT_MAX - file.position) {
-     errno = ENOMEM;
+     errno = EFBIG;
      return -1;
   }
   unsigned required = file.position + (unsigned)len;
-  if (ensure_file_capacity(file, required) != 0) {
-     return -1;
+
+  if (file.cached && required > BMC64_FILE_CACHE_LIMIT &&
+      !spill_cache(file)) {
+    return -1;
   }
 
-  // Do the write.
-  if (len > 0) {
+  if (file.cached) {
+    if (ensure_file_capacity(file, required) != 0) return -1;
     memcpy(file.contents + file.position, ptr, len);
+    file.position += static_cast<unsigned>(len);
+  } else {
+    UINT written = 0;
+    const FRESULT result = measured_write(
+        &file.file, ptr, static_cast<UINT>(len), &written);
+    if (result != FR_OK) {
+      set_fatfs_errno(result);
+      return -1;
+    }
+    file.position += written;
+    if (written == 0) {
+      errno = EIO;
+      return -1;
+    }
+    len = static_cast<int>(written);
   }
-  file.position += len;
   if (file.position > file.size) {
      file.size = file.position;
   }
+  file.written_to = 1;
 
   return len;
 }
@@ -808,7 +1060,7 @@ static struct dirent *do_readdir(CircleDir *dir, struct dirent *de) {
   FRESULT res = f_findnext(&dir->dir, &fno);
   if (res == FR_OK && fno.fname[0] != 0) {
     snprintf(de->d_name, sizeof de->d_name, "%s", fno.fname);
-    de->d_ino = 0;
+    de->d_ino = (ino_t)(BMC64_DIRENT_FAT_ATTR_VALID | fno.fattrib);
     result = de;
   }
 
@@ -963,7 +1215,27 @@ extern "C" int _fstat(int fildes, struct stat *st) {
     return -1;
   }
 
-  return _stat(file.fname, st);
+  if (_stat(file.fname, st) != 0) return -1;
+  st->st_size = file.size;
+  return 0;
+}
+
+extern "C" int fsync(int fildes) {
+  if (fildes < 0 || static_cast<unsigned int>(fildes) >= MAX_OPEN_FILES) {
+    errno = EBADF;
+    return -1;
+  }
+
+  CircleFile &file = fileTab[fildes];
+  if (!file.in_use || file.mode == O_RDONLY) {
+    errno = EBADF;
+    return -1;
+  }
+
+  const bool ok = file.cached ? flush_cached_file(file) : sync_file(file);
+  if (!ok) return -1;
+  file.written_to = 0;
+  return 0;
 }
 
 extern "C" int _lseek(int fildes, int ptr, int dir) {
@@ -977,16 +1249,6 @@ extern "C" int _lseek(int fildes, int ptr, int dir) {
   if (!file.in_use) {
     errno = EBADF;
     return -1;
-  }
-
-  if (file.mode == O_RDONLY) {
-    // Assert FIL has been opened
-    if (slurp_file(file)) {
-       if (errno == 0) {
-          errno = EACCES;
-       }
-       return -1;
-    }
   }
 
   long long next_position;
@@ -1006,7 +1268,19 @@ extern "C" int _lseek(int fildes, int ptr, int dir) {
     return -1;
   }
 
-  file.position = (unsigned)next_position;
+  if (file.mode == O_RDONLY && !file.cached &&
+      file.size <= BMC64_FILE_CACHE_LIMIT) {
+    if (!cache_file(file) && errno != ENOMEM) return -1;
+    if (!file.cached) errno = 0;
+  }
+
+  if (!file.cached &&
+      measured_seek(&file.file, static_cast<FSIZE_t>(next_position)) !=
+          FR_OK) {
+    errno = EIO;
+    return -1;
+  }
+  file.position = static_cast<unsigned>(next_position);
   return file.position;
 }
 

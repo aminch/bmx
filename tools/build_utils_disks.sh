@@ -79,12 +79,12 @@ if [[ -z "$STAGE_DIR" || "${STAGE_DIR:-}" == "-h" || "${STAGE_DIR:-}" == "--help
   exit 1
 fi
 
-for machine in c64 c128 vic20 plus4 pet; do
+for machine in c64 scpu64 c128 vic20 plus4 pet; do
   mkdir -p "$STAGE_DIR/utils/$machine"
 done
 
 have_sources=0
-for machine in c64 c128 vic20 plus4 pet; do
+for machine in c64 scpu64 c128 vic20 plus4 pet; do
   if machine_has_files "$machine"; then
     have_sources=1
     break
@@ -97,7 +97,7 @@ fi
 
 c1541="$(find_c1541)"
 
-for machine in c64 c128 vic20 plus4 pet; do
+for machine in c64 scpu64 c128 vic20 plus4 pet; do
   if machine_has_files "$machine"; then
     build_machine_disk "$c1541" "$machine"
   fi

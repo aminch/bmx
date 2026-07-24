@@ -329,9 +329,11 @@ ViceOptions::ViceOptions(void)
         m_rs232NetInterface = BMX_RS232_INTERFACE_USERPORT;
       }
     } else if (strcmp(pOption, "rs232net_target") == 0) {
+      DecodeOptionValue(pValue);
       strncpy(m_rs232NetTarget, pValue, sizeof m_rs232NetTarget - 1);
       m_rs232NetTarget[sizeof m_rs232NetTarget - 1] = '\0';
     } else if (strcmp(pOption, "rs232net_phonebook") == 0) {
+      DecodeOptionValue(pValue);
       strncpy(m_rs232NetPhonebook, pValue, sizeof m_rs232NetPhonebook - 1);
       m_rs232NetPhonebook[sizeof m_rs232NetPhonebook - 1] = '\0';
     } else if (strcmp(pOption, "rs232net_baud") == 0) {

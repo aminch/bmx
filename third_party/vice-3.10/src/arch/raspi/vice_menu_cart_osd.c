@@ -70,6 +70,7 @@ void emux_show_cart_osd_menu(void) {
 
   struct menu_item *child;
   if (emux_machine_class == BMC64_MACHINE_CLASS_C64 ||
+      emux_machine_class == BMC64_MACHINE_CLASS_SCPU64 ||
       emux_machine_class == BMC64_MACHINE_CLASS_C128) {
     child = ui_menu_add_button(MENU_SAVE_EASYFLASH, root, "Save EasyFlash Now");
     child->on_value_changed = menu_item_changed;

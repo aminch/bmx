@@ -77,7 +77,7 @@ public:
   void circle_clear_fbl(int layer);
   void circle_show_fbl(int layer);
   void circle_hide_fbl(int layer);
-  void circle_frames_ready_fbl(int layer1, int layer2, int sync);
+  void circle_present_fbl(uint32_t ready_mask, int sync);
   void circle_set_palette_fbl(int layer, uint8_t index, uint16_t rgb565);
   void circle_set_palette32_fbl(int layer, uint8_t index, uint32_t argb);
   void circle_update_palette_fbl(int layer);
@@ -104,9 +104,13 @@ public:
   void circle_lock_release();
   void circle_boot_complete();
   void circle_set_volume(int value);
+  int circle_get_sound_output_priority();
+  void circle_set_sound_output_priority(int value);
   int circle_get_model();
   int circle_gpio_enabled();
   int circle_gpio_outputs_enabled();
+  void circle_get_diagnostics(struct bmx_diagnostics_snapshot *snapshot);
+  int circle_prepare_system_shutdown(void);
   void circle_kernel_core_init_complete(int core);
   unsigned circle_get_arm_clock();
   void circle_get_fbl_dimensions(int layer, int *display_w, int *display_h,
@@ -149,10 +153,15 @@ private:
   void ReadWriteUserport();
 
   ViceSound *mViceSound;
+  CUSBKeyboardDevice *mUSBKeyboards[MAX_USB_DEVICES];
+  CMouseDevice *mUSBMouse;
+  CUSBGamePadDevice *mUSBGamepads[MAX_USB_DEVICES];
+  boolean mUSBServicesReady;
   CCPUThrottle mCPUThrottle;
   CSpinLock m_Lock;
   int mNumJoy;
   int mVolume;
+  SoundOutputPriority mSoundOutputPriority;
   int mNumCoresComplete;
   bool mNeedSoundInit;
   int mNumSoundChannels;

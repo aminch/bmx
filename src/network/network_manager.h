@@ -39,6 +39,14 @@ private:
   char m_wpaConfigPath[64];
 };
 
+// Read-only access for an explicitly invoked service such as Update. This
+// never creates, enables or reconfigures a network subsystem.
+CNetSubSystem *GetActiveNetworkSubsystem(void);
+
+// Returns the configured feature state and current link/IP readiness in one
+// read-only call. It never creates, enables or reconfigures networking.
+bool ReadNetworkFeatureState(bool *feature_enabled, bool *ready);
+
 } // namespace bmx
 
 #endif

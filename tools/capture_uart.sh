@@ -31,9 +31,16 @@ if [ ! -e "$SERIAL_DEVICE" ]; then
   exit 1
 fi
 
+if [ -e "$LOGFILE" ]; then
+  echo "refusing to overwrite existing UART log: $LOGFILE" >&2
+  echo "choose a new filename so the previous hardware evidence is preserved" >&2
+  exit 1
+fi
+
 stty -F "$SERIAL_DEVICE" "$BAUD" raw cs8 -cstopb -parenb -ixon -ixoff -crtscts -echo
 
 echo "capturing $SERIAL_DEVICE at $BAUD baud -> $LOGFILE"
+echo "start the target only after this line; updater diagnostics use source bmx-update"
 echo "press Ctrl-C to stop"
 
 stdbuf -oL cat "$SERIAL_DEVICE" | tee "$LOGFILE"

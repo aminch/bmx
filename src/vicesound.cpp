@@ -48,6 +48,11 @@ bool sound_device_matches(const char *configured, const char *name) {
   return configured && strcasecmp(configured, name) == 0;
 }
 
+bool sound_device_is_usb(const char *configured) {
+  return sound_device_matches(configured, "usb") ||
+         sound_device_matches(configured, "sndusb");
+}
+
 bool start_sound_device(CSoundBaseDevice *device, const char *name,
                         unsigned queue_size_frames, unsigned channels) {
   if (!device->AllocateQueueFrames(queue_size_frames)) {
@@ -67,6 +72,14 @@ bool start_sound_device(CSoundBaseDevice *device, const char *name,
 
 } // namespace
 
+SoundOutputPriority ViceSound::DefaultOutputPriority(void) {
+  const char *sounddev = CKernelOptions::Get()->GetSoundDevice();
+  if (sound_device_is_usb(sounddev)) {
+    return SOUND_OUTPUT_PRIORITY_USB_HDMI;
+  }
+  return SOUND_OUTPUT_PRIORITY_HDMI_USB;
+}
+
 ViceSound::ViceSound(CInterruptSystem *pInterrupt,
                      TVCHIQSoundDestination Destination)
     : mSoundDevice(nullptr),
@@ -80,35 +93,20 @@ ViceSound::~ViceSound(void) {
   CancelPlayback();
 }
 
-boolean ViceSound::Playback(int volume, int channels) {
-  CancelPlayback();
-
-  mNumChannels = channels >= 1 ? (unsigned) channels : 1;
-  mControlLock.Acquire();
-  mVolumePercent = clamp_percent(volume);
-  mControlLock.Release();
-
-  const char *sounddev = CKernelOptions::Get()->GetSoundDevice();
-  if (sounddev == nullptr) {
-    sounddev = "";
+boolean ViceSound::StartHDMI(void) {
+  mSoundDevice = new CHDMISoundBaseDevice(mInterrupt, SAMPLE_RATE,
+                                          HDMI_CHUNK_WORDS);
+  if (start_sound_device(mSoundDevice, "hdmi",
+                         mQueueSizeFrames, mNumChannels)) {
+    return TRUE;
   }
 
-  if (!sound_device_matches(sounddev, "usb")) {
-    mSoundDevice = new CHDMISoundBaseDevice(mInterrupt, SAMPLE_RATE,
-                                            HDMI_CHUNK_WORDS);
-    if (start_sound_device(mSoundDevice, "hdmi",
-                           mQueueSizeFrames, mNumChannels)) {
-      return TRUE;
-    }
+  delete mSoundDevice;
+  mSoundDevice = nullptr;
+  return FALSE;
+}
 
-    delete mSoundDevice;
-    mSoundDevice = nullptr;
-
-    if (sound_device_matches(sounddev, "hdmi")) {
-      return FALSE;
-    }
-  }
-
+boolean ViceSound::StartUSB(void) {
   mSoundDevice = new CUSBSoundBaseDevice(SAMPLE_RATE,
                                          CUSBSoundBaseDevice::DeviceModeTXOnly,
                                          0);
@@ -120,6 +118,21 @@ boolean ViceSound::Playback(int volume, int channels) {
   delete mSoundDevice;
   mSoundDevice = nullptr;
   return FALSE;
+}
+
+boolean ViceSound::Playback(int volume, int channels,
+                            SoundOutputPriority priority) {
+  CancelPlayback();
+
+  mNumChannels = channels >= 1 ? (unsigned) channels : 1;
+  mControlLock.Acquire();
+  mVolumePercent = clamp_percent(volume);
+  mControlLock.Release();
+
+  if (priority == SOUND_OUTPUT_PRIORITY_USB_HDMI) {
+    return StartUSB() || StartHDMI();
+  }
+  return StartHDMI() || StartUSB();
 }
 
 boolean ViceSound::PlaybackActive(void) const {

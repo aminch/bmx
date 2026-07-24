@@ -2,7 +2,7 @@
 """Create a two-partition BMX SD card.
 
 Layout:
-  1. BMX BOOT, 128 MiB FAT32, boot/system files
+  1. BMX BOOT, at least 512 MiB FAT32, boot/system files
   2. BMX USER, remaining space FAT32, user-controlled files
 """
 
@@ -16,11 +16,13 @@ import time
 from pathlib import Path
 
 
-BOOT_SIZE_MIB = 128
+DEFAULT_BOOT_SIZE_MIB = 512
+MIN_BOOT_SIZE_MIB = 512
+ONLINE_UPDATE_BOOT_SIZE_MIB = 512
 BOOT_LABEL = "BMX BOOT"
 USER_LABEL = "BMX USER"
 USER_TOP_LEVEL_DIRS = {"disks", "tapes", "carts", "snapshots", "phonebooks"}
-MACHINE_DIRS = ("C64", "C128", "VIC20", "PLUS4", "PET")
+MACHINE_DIRS = ("C64", "SCPU64", "C128", "VIC20", "PLUS4", "PET")
 
 
 def run(cmd, *, check=True):
@@ -60,7 +62,7 @@ def logical_sector_size(device):
 
 def mounted_at(path):
     result = subprocess.run(
-        ["findmnt", "-rn", "-S", path, "-o", "TARGET"],
+        ["findmnt", "-n", "-S", path, "-o", "TARGET"],
         check=False,
         text=True,
         stdout=subprocess.PIPE,
@@ -85,7 +87,10 @@ def ensure_unmounted(device, allow_unmount):
 
     for path, mount in reversed(mounts):
         print(f"unmounting {path} from {mount}")
-        run(["umount", mount])
+        # Unmount by the unambiguous block-device source.  In raw output,
+        # findmnt escapes spaces in targets as ``\x20``; passing that display
+        # form to umount as a path fails for labels such as "BMX BOOT".
+        run(["umount", "--", path])
 
 
 def tree_size(path):
@@ -133,10 +138,10 @@ def wait_for_partitions(device):
     raise SystemExit(f"partition devices did not appear: {part1}, {part2}")
 
 
-def write_partitions(device):
+def write_partitions(device, boot_size_mib):
     sector_size = logical_sector_size(device)
     start_sector = 1024 * 1024 // sector_size
-    boot_sectors = BOOT_SIZE_MIB * 1024 * 1024 // sector_size
+    boot_sectors = boot_size_mib * 1024 * 1024 // sector_size
     user_start_sector = start_sector + boot_sectors
     spec = f"""label: dos
 
@@ -159,10 +164,33 @@ def format_partitions(part1, part2):
     run([mkfs, "-F", "32", "-n", USER_LABEL, part2])
 
 
+def boot_size_mib(value):
+    """Parse and validate the requested boot partition size."""
+    try:
+        size = int(value, 10)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("boot size must be an integer in MiB") from error
+    if size < MIN_BOOT_SIZE_MIB:
+        raise argparse.ArgumentTypeError(
+            f"boot size must be at least {MIN_BOOT_SIZE_MIB} MiB"
+        )
+    return size
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", required=True, help="target block device, e.g. /dev/sdX")
     parser.add_argument("--stage-dir", required=True, help="staged BMX boot files")
+    parser.add_argument(
+        "--boot-size-mib",
+        type=boot_size_mib,
+        default=DEFAULT_BOOT_SIZE_MIB,
+        metavar="MIB",
+        help=(
+            f"boot partition size in MiB (default: {DEFAULT_BOOT_SIZE_MIB}; "
+            f"minimum: {MIN_BOOT_SIZE_MIB})"
+        ),
+    )
     parser.add_argument("--yes", action="store_true", help="actually repartition and format")
     parser.add_argument("--unmount", action="store_true", help="unmount target partitions first")
     args = parser.parse_args()
@@ -183,14 +211,17 @@ def main():
         raise SystemExit(f"stage directory does not exist: {stage_dir}")
 
     stage_bytes = tree_size(stage_dir)
-    boot_bytes = BOOT_SIZE_MIB * 1024 * 1024
+    boot_bytes = args.boot_size_mib * 1024 * 1024
     if stage_bytes > boot_bytes * 8 // 10:
         raise SystemExit(
-            f"stage directory is too large for {BOOT_SIZE_MIB} MiB boot partition"
+            f"stage directory is too large for {args.boot_size_mib} MiB boot partition"
         )
 
     print("Target layout:")
-    print(f"  {partition_path(device, 1)}  {BOOT_LABEL}  FAT32  {BOOT_SIZE_MIB} MiB")
+    print(
+        f"  {partition_path(device, 1)}  {BOOT_LABEL}  FAT32  "
+        f"{args.boot_size_mib} MiB"
+    )
     print(f"  {partition_path(device, 2)}  {USER_LABEL}  FAT32  remaining space")
     print(f"  stage size: {stage_bytes / (1024 * 1024):.1f} MiB")
     print()
@@ -200,7 +231,7 @@ def main():
         return 0
 
     ensure_unmounted(device, args.unmount)
-    write_partitions(device)
+    write_partitions(device, args.boot_size_mib)
     part1, part2 = wait_for_partitions(device)
     format_partitions(part1, part2)
 

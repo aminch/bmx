@@ -264,7 +264,7 @@ int drive_resources_type_init(unsigned int default_type)
     for (dnr = 0; dnr < NUM_DISK_UNITS; dnr++) {
         diskunit_context_t *unit = diskunit_context[dnr];
 
-        if (dnr <= 1) {
+        if (dnr == 0) {
             type = default_type;
         } else {
             type = DRIVE_TYPE_NONE;

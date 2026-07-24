@@ -235,6 +235,12 @@ static void add_button_choices(struct menu_item *tmp_item) {
   strcpy(tmp_item->choices[BTN_ASSIGN_40_80_COLUMN], function_to_string(BTN_ASSIGN_40_80_COLUMN));
   strcpy(tmp_item->choices[BTN_ASSIGN_VKBD_TOGGLE], function_to_string(BTN_ASSIGN_VKBD_TOGGLE));
   strcpy(tmp_item->choices[BTN_ASSIGN_FLUSH_DISK], function_to_string(BTN_ASSIGN_FLUSH_DISK));
+  strcpy(tmp_item->choices[BTN_ASSIGN_ATTACH_TAPE], function_to_string(BTN_ASSIGN_ATTACH_TAPE));
+  strcpy(tmp_item->choices[BTN_ASSIGN_ATTACH_CART], function_to_string(BTN_ASSIGN_ATTACH_CART));
+  strcpy(tmp_item->choices[BTN_ASSIGN_ATTACH_DISK_8], function_to_string(BTN_ASSIGN_ATTACH_DISK_8));
+  strcpy(tmp_item->choices[BTN_ASSIGN_ATTACH_DISK_9], function_to_string(BTN_ASSIGN_ATTACH_DISK_9));
+  strcpy(tmp_item->choices[BTN_ASSIGN_ATTACH_DISK_10], function_to_string(BTN_ASSIGN_ATTACH_DISK_10));
+  strcpy(tmp_item->choices[BTN_ASSIGN_ATTACH_DISK_11], function_to_string(BTN_ASSIGN_ATTACH_DISK_11));
 
   char scratch[32];
   for (int n = 0; n < 6; n++) {
@@ -248,6 +254,7 @@ static void add_button_choices(struct menu_item *tmp_item) {
 
 
   if (emux_machine_class != BMC64_MACHINE_CLASS_C64 &&
+      emux_machine_class != BMC64_MACHINE_CLASS_SCPU64 &&
       emux_machine_class != BMC64_MACHINE_CLASS_C128) {
     tmp_item->choice_disabled[BTN_ASSIGN_CART_FREEZE] = 1;
   }
@@ -261,6 +268,14 @@ static void add_button_choices(struct menu_item *tmp_item) {
 
   if (emux_machine_class == BMC64_MACHINE_CLASS_PET) {
     tmp_item->choice_disabled[BTN_ASSIGN_VKBD_TOGGLE] = 1;
+    tmp_item->choice_disabled[BTN_ASSIGN_ATTACH_CART] = 1;
+  }
+
+  if (emux_machine_class == BMC64_MACHINE_CLASS_PLUS4EMU) {
+    tmp_item->choice_disabled[BTN_ASSIGN_ATTACH_CART] = 1;
+    tmp_item->choice_disabled[BTN_ASSIGN_ATTACH_DISK_9] = 1;
+    tmp_item->choice_disabled[BTN_ASSIGN_ATTACH_DISK_10] = 1;
+    tmp_item->choice_disabled[BTN_ASSIGN_ATTACH_DISK_11] = 1;
   }
 }
 

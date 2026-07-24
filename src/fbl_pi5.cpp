@@ -14,7 +14,9 @@
 // limitations under the License.
 
 #include "fbl.h"
+#include "pi5kms/framebuffer_reuse.h"
 #include "pi5kms/pi5_kms.h"
+#include "third_party/common/circle.h"
 #include "viceoptions.h"
 
 #include <assert.h>
@@ -377,10 +379,21 @@ bool ensure_hwscale_framebuffer(unsigned slot, unsigned buffer_index,
 
   pi5kms::Framebuffer *fb = &g_kms_hwscale_framebuffers[slot][buffer_index];
   if (fb->pixels != nullptr &&
-      fb->width == width &&
-      fb->height == height &&
-      fb->depth == depth) {
+      pi5kms::CanReuseFramebuffer(fb->width, fb->height, fb->depth,
+                                  width, height, depth)) {
     return true;
+  }
+
+  u32 allocation_width = width;
+  u32 allocation_height = height;
+  if (fb->pixels != nullptr && fb->depth == depth) {
+    // Never trade one existing dimension for another. Keeping capacity
+    // monotonic prevents alternating aspect ratios from recreating large DMA
+    // blocks that Circle cannot return to its bucket allocator.
+    allocation_width = pi5kms::ExpandedFramebufferDimension(
+        fb->width, allocation_width);
+    allocation_height = pi5kms::ExpandedFramebufferDimension(
+        fb->height, allocation_height);
   }
 
   if (fb->pixels != nullptr) {
@@ -388,7 +401,8 @@ bool ensure_hwscale_framebuffer(unsigned slot, unsigned buffer_index,
     g_kms_hwscale_framebuffer_valid[slot][buffer_index] = false;
   }
 
-  if (!pi5kms::CreateFramebuffer(width, height, depth, fb)) {
+  if (!pi5kms::CreateFramebuffer(allocation_width, allocation_height,
+                                 depth, fb)) {
     return false;
   }
   g_kms_hwscale_framebuffer_valid[slot][buffer_index] = false;
@@ -530,7 +544,7 @@ bool FrameBufferLayer::TryKmsDirectScanout(FrameBufferLayer **layers,
       format,
       g_interpolation_enabled ? pi5kms::kScaleFilterMitchell
                               : pi5kms::kScaleFilterNearest,
-      {0, 0, fb.width, fb.height},
+      {0, 0, (u32)layer->src_w_, (u32)layer->src_h_},
       {layer->dst_x_, layer->dst_y_,
        (u32)layer->dst_w_, (u32)layer->dst_h_}
     };
@@ -848,7 +862,7 @@ void FrameBufferLayer::Initialize() {
          g_compose_pitch_bytes);
 }
 
-void FrameBufferLayer::OGLInit() {}
+bool FrameBufferLayer::OGLInit() { return false; }
 
 int FrameBufferLayer::Allocate(int pixelmode, uint8_t **pixels,
                                int width, int height, int *pitch) {
@@ -1024,7 +1038,7 @@ void FrameBufferLayer::Show() {
          layer_, src_x_, src_y_, src_w_, src_h_,
          dst_x_, dst_y_, dst_w_, dst_h_, display_width_, display_height_);
 
-  SwapResources(false, this, nullptr);
+  PresentLayer(false, this);
 }
 
 void FrameBufferLayer::Hide() {
@@ -1033,7 +1047,7 @@ void FrameBufferLayer::Hide() {
   }
 
   showing_ = false;
-  SwapResources(false, this, nullptr);
+  PresentLayer(false, this);
 }
 
 void *FrameBufferLayer::GetPixels() {
@@ -1045,11 +1059,29 @@ void FrameBufferLayer::FrameReady(int to_offscreen) {
   MarkDirty();
 }
 
-void FrameBufferLayer::SwapResources(bool sync,
-                                     FrameBufferLayer *fb1,
-                                     FrameBufferLayer *fb2) {
-  (void) fb1;
-  (void) fb2;
+void FrameBufferLayer::PresentLayer(bool sync, FrameBufferLayer *layer) {
+  if (layer) {
+    layer->MarkDirty();
+  }
+  PresentLayerList(sync, nullptr, 0);
+}
+
+void FrameBufferLayer::PresentLayers(bool sync, FrameBufferLayer *layers,
+                                     uint32_t ready_mask) {
+  if (layers) {
+    for (unsigned i = 0; i < FB_NUM_LAYERS; i++) {
+      if (ready_mask & FB_LAYER_MASK(i)) {
+        layers[i].MarkDirty();
+      }
+    }
+  }
+  PresentLayerList(sync, nullptr, 0);
+}
+
+void FrameBufferLayer::PresentLayerList(bool sync, FrameBufferLayer **layers,
+                                        unsigned layer_list_count) {
+  (void) layers;
+  (void) layer_list_count;
 
   if (!initialized_) {
     return;
@@ -1063,20 +1095,20 @@ void FrameBufferLayer::SwapResources(bool sync,
   }
 
   FrameBufferLayer *active[FB_NUM_LAYERS];
-  unsigned count = 0;
+  unsigned active_count = 0;
   bool has_overlay_layer = false;
   bool has_ui_layer = false;
   for (unsigned i = 0; i < FB_NUM_LAYERS; i++) {
     if (g_layers[i] && g_layers[i]->Showing()) {
-      active[count++] = g_layers[i];
+      active[active_count++] = g_layers[i];
       has_overlay_layer = has_overlay_layer || g_layers[i]->transparency_;
       has_ui_layer = has_ui_layer || i == FB_LAYER_UI;
     }
   }
 
-  sort_layers(active, count);
+  sort_layers(active, active_count);
   const bool wait_for_vblank = sync || has_ui_layer;
-  if (TryKmsDirectScanout(active, count, screen_w, screen_h,
+  if (TryKmsDirectScanout(active, active_count, screen_w, screen_h,
                           wait_for_vblank)) {
     if (sync && screen_ != nullptr) {
       screen_->WaitForVerticalSync();
@@ -1089,7 +1121,7 @@ void FrameBufferLayer::SwapResources(bool sync,
   memset(g_compose_pixels, 0, (size_t) g_compose_pitch_bytes *
          (size_t) screen_h);
 
-  for (unsigned i = 0; i < count; i++) {
+  for (unsigned i = 0; i < active_count; i++) {
     FrameBufferLayer *layer = active[i];
 
     int start_x = max_int(0, layer->dst_x_);
@@ -1156,7 +1188,7 @@ void FrameBufferLayer::SetPalette(uint8_t index, uint32_t argb) {
 
 void FrameBufferLayer::UpdatePalette() {
   if (showing_) {
-    SwapResources(false, this, nullptr);
+    PresentLayer(false, this);
   }
 }
 
@@ -1246,7 +1278,7 @@ void FrameBufferLayer::SetInterpolation(int enable) {
 
   g_interpolation_enabled = new_value;
   if (initialized_) {
-    SwapResources(false, nullptr, nullptr);
+    PresentLayerList(false, nullptr, 0);
   }
 }
 

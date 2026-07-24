@@ -1,4 +1,5 @@
 #include "pi5_kms.h"
+#include "scaling_order.h"
 
 #include <circle/bcm2835.h>
 #include <circle/bcmpropertytags.h>
@@ -111,12 +112,6 @@ bool g_hvs_filter_kernels_uploaded = false;
 unsigned g_hvs_submitted_dlist = 0;
 bool g_hvs_has_active_dlist = false;
 bool g_hvs_vblank_timeout_logged = false;
-
-enum HvsScaling {
-  kHvsScalingNone = 0,
-  kHvsScalingPpf,
-  kHvsScalingTpz,
-};
 
 constexpr u32 HvsField(u32 value, unsigned shift) {
   return value << shift;
@@ -548,30 +543,38 @@ bool AppendPlaneDlist(const Plane &plane,
   }
 
   if (!unity) {
-    if (x_scaling == kHvsScalingPpf) {
-      dlist[(*count)++] = MakeHvsPpfWord(plane.source.width,
-                                         plane.destination.width,
-                                         (u32)plane.source.x << 16,
-                                         nearest);
-    } else if (x_scaling == kHvsScalingTpz) {
-      dlist[(*count)++] = MakeHvsTpzWord0(plane.source.width,
-                                          plane.destination.width);
-      dlist[(*count)++] = MakeHvsTpzWord1(plane.source.width,
-                                          plane.destination.width);
-    }
-
-    if (y_scaling == kHvsScalingPpf) {
-      dlist[(*count)++] = MakeHvsPpfWord(plane.source.height,
-                                         plane.destination.height,
-                                         (u32)plane.source.y << 16,
-                                         nearest);
-      dlist[(*count)++] = 0xC0C0C0C0U;
-    } else if (y_scaling == kHvsScalingTpz) {
-      dlist[(*count)++] = MakeHvsTpzWord0(plane.source.height,
-                                          plane.destination.height);
-      dlist[(*count)++] = MakeHvsTpzWord1(plane.source.height,
-                                          plane.destination.height);
-      dlist[(*count)++] = 0xC0C0C0C0U;
+    HvsScalingParameter parameter_order[4];
+    const unsigned parameter_count = BuildHvsScalingParameterOrder(
+        x_scaling, y_scaling, parameter_order);
+    for (unsigned i = 0; i < parameter_count; ++i) {
+      switch (parameter_order[i]) {
+        case kHvsHorizontalPpf:
+          dlist[(*count)++] = MakeHvsPpfWord(plane.source.width,
+                                             plane.destination.width,
+                                             (u32)plane.source.x << 16,
+                                             nearest);
+          break;
+        case kHvsVerticalPpf:
+          dlist[(*count)++] = MakeHvsPpfWord(plane.source.height,
+                                             plane.destination.height,
+                                             (u32)plane.source.y << 16,
+                                             nearest);
+          dlist[(*count)++] = 0xC0C0C0C0U;
+          break;
+        case kHvsHorizontalTpz:
+          dlist[(*count)++] = MakeHvsTpzWord0(plane.source.width,
+                                              plane.destination.width);
+          dlist[(*count)++] = MakeHvsTpzWord1(plane.source.width,
+                                              plane.destination.width);
+          break;
+        case kHvsVerticalTpz:
+          dlist[(*count)++] = MakeHvsTpzWord0(plane.source.height,
+                                              plane.destination.height);
+          dlist[(*count)++] = MakeHvsTpzWord1(plane.source.height,
+                                              plane.destination.height);
+          dlist[(*count)++] = 0xC0C0C0C0U;
+          break;
+      }
     }
 
     if (x_scaling == kHvsScalingPpf || y_scaling == kHvsScalingPpf) {

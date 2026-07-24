@@ -172,9 +172,19 @@ static void check_sid_options() {
 }
 
 void emu_machine_init(int raster_skip_enabled, int raster_skip2_enabled) {
+  emux_c64_core = BMC64_C64_CORE_UNKNOWN;
+
   switch (machine_class) {
     case VICE_MACHINE_C64:
        emux_machine_class = BMC64_MACHINE_CLASS_C64;
+       emux_c64_core = BMC64_C64_CORE_X64;
+       break;
+    case VICE_MACHINE_C64SC:
+       emux_machine_class = BMC64_MACHINE_CLASS_C64;
+       emux_c64_core = BMC64_C64_CORE_X64SC;
+       break;
+    case VICE_MACHINE_SCPU64:
+       emux_machine_class = BMC64_MACHINE_CLASS_SCPU64;
        break;
     case VICE_MACHINE_C128:
        emux_machine_class = BMC64_MACHINE_CLASS_C128;
@@ -245,23 +255,6 @@ int emux_attach_disk_image(int unit, char* filename) {
   return file_system_attach_disk(unit, 0, filename);
 }
 
-static const char *default_utils_disk_machine_dir(void) {
-  switch (machine_class) {
-    case VICE_MACHINE_C64:
-      return "c64";
-    case VICE_MACHINE_C128:
-      return "c128";
-    case VICE_MACHINE_VIC20:
-      return "vic20";
-    case VICE_MACHINE_PLUS4:
-      return "plus4";
-    case VICE_MACHINE_PET:
-      return "pet";
-    default:
-      return NULL;
-  }
-}
-
 static int file_exists(const char *path) {
   FILE *fp = fopen(path, "rb");
 
@@ -277,31 +270,56 @@ static int drive_has_disk_image(int unit) {
   return file_system_get_image(unit, 0) != NULL;
 }
 
-static void attach_default_utils_disk(void) {
-  const char *machine_dir = default_utils_disk_machine_dir();
-  char path[256];
+static int ensure_default_disk_drive_type(int unit) {
+  int drive_type;
 
-  if (machine_dir == NULL) {
-    return;
+  if (resources_get_int_sprintf("Drive%iType", &drive_type, unit) < 0) {
+    return 0;
   }
 
-  if (drive_has_disk_image(9)) {
-    return;
+  if (drive_type != DRIVE_TYPE_NONE) {
+    return 1;
   }
 
-  snprintf(path, sizeof(path), "/utils/%s/utils.d64", machine_dir);
-  if (!file_exists(path)) {
-    return;
+  if (resources_get_default_value("Drive8Type", &drive_type) < 0 ||
+      drive_type == DRIVE_TYPE_NONE ||
+      drive_check_type(drive_type, unit - 8) <= 0) {
+    return 0;
   }
 
-  emux_attach_disk_image(9, path);
+  return resources_set_int_sprintf("Drive%iType", drive_type, unit) == 0;
 }
 
-static void attach_default_utils_disk_trap(uint16_t addr, void *data) {
+static int prepare_default_disk(void) {
+  const char *path = menu_default_disk_image();
+  int unit = menu_default_disk_drive();
+
+  if (unit < 8 || unit > 11 || path == NULL || path[0] == '\0' ||
+      drive_has_disk_image(unit) || !menu_default_disk_prepare_volume() ||
+      !file_exists(path)) {
+    return 0;
+  }
+
+  return ensure_default_disk_drive_type(unit);
+}
+
+static void attach_default_disk(void) {
+  const char *path = menu_default_disk_image();
+  int unit = menu_default_disk_drive();
+
+  if (unit < 8 || unit > 11 || path == NULL || path[0] == '\0' ||
+      drive_has_disk_image(unit) || !file_exists(path)) {
+    return;
+  }
+
+  emux_attach_disk_image(unit, (char *)path);
+}
+
+static void attach_default_disk_trap(uint16_t addr, void *data) {
   (void)addr;
   (void)data;
 
-  attach_default_utils_disk();
+  attach_default_disk();
 }
 
 void emux_detach_disk(int unit) {
@@ -469,19 +487,41 @@ void emux_drive_change_model(int unit) {
   }
 }
 
+static int get_all_drive_resource(const char *resource_format) {
+  int enabled = 1;
+  int found = 0;
+
+  for (int unit = DRIVE_UNIT_MIN; unit <= DRIVE_UNIT_MAX; unit++) {
+    int value = 0;
+    if (resources_get_int_sprintf(resource_format, &value, unit) == 0) {
+      enabled = enabled && value;
+      found = 1;
+    }
+  }
+
+  return found && enabled;
+}
+
+static void set_all_drive_resource(const char *resource_format, int value) {
+  for (int unit = DRIVE_UNIT_MIN; unit <= DRIVE_UNIT_MAX; unit++) {
+    resources_set_int_sprintf(resource_format, value, unit);
+  }
+}
+
 void emux_add_drive_option(struct menu_item* root, int drive) {
   int tmp;
 
   if (emux_machine_class != BMC64_MACHINE_CLASS_C64 &&
+      emux_machine_class != BMC64_MACHINE_CLASS_SCPU64 &&
       emux_machine_class != BMC64_MACHINE_CLASS_C128) {
     return;
   }
 
   if (drive < 0) {
      // Options applicable to all drives
-     resources_get_int("DriveTrueEmulation", &tmp);
+     tmp = get_all_drive_resource("Drive%iTrueEmulation");
      ui_menu_add_toggle(MENU_DRIVE_TRUE_EMULATION, root, "True Emulation", tmp);
-     resources_get_int("VirtualDevices", &tmp);
+     tmp = get_all_drive_resource("TrapDevice%i");
      ui_menu_add_toggle(MENU_VIRTUAL_DEVICES, root, "Virtual Devices", tmp);
      return;
   }
@@ -797,6 +837,12 @@ void emux_detach_tape(void) {
    tape_image_detach(1);
 }
 
+int emux_prepare_shutdown(void) {
+   file_system_detach_disk_shutdown();
+   tape_image_detach_all();
+   return 0;
+}
+
 static int viceSidEngineToBmcChoice(int viceEngine) {
   switch (viceEngine) {
   case SID_ENGINE_FASTSID:
@@ -886,8 +932,11 @@ void emux_add_sound_options(struct menu_item* parent) {
      return;
   }
 
-  int supports_dual_sid = (machine_class == VICE_MACHINE_C64 || machine_class == VICE_MACHINE_C128) &&
-                           circle_get_model() >= 2;
+  int supports_dual_sid = (machine_class == VICE_MACHINE_C64 ||
+                           machine_class == VICE_MACHINE_C64SC ||
+                           machine_class == VICE_MACHINE_SCPU64 ||
+                           machine_class == VICE_MACHINE_C128) &&
+                          circle_get_model() >= 2;
 
   // Resid by default
   struct menu_item* child = sid_engine_item =
@@ -1272,10 +1321,10 @@ int emux_handle_menu_change(struct menu_item* item) {
       resources_set_int("KeymapIndex", item->choice_ints[item->value]);
       return 1;
     case MENU_DRIVE_TRUE_EMULATION:
-      resources_set_int("DriveTrueEmulation", item->value);
+      set_all_drive_resource("Drive%iTrueEmulation", item->value);
       return 1;
     case MENU_VIRTUAL_DEVICES:
-      resources_set_int("VirtualDevices", item->value);
+      set_all_drive_resource("TrapDevice%i", item->value);
       return 1;
     default:
       break;
@@ -1357,7 +1406,9 @@ int emux_handle_loaded_setting(char *name, char* value_str, int value) {
 
 void emux_load_settings_done(void) {
   emux_machine_load_settings_done();
-  interrupt_maincpu_trigger_trap(attach_default_utils_disk_trap, NULL);
+  if (prepare_default_disk()) {
+    interrupt_maincpu_trigger_trap(attach_default_disk_trap, NULL);
+  }
 }
 
 static int rs232net_acia_base_for_interface(int interface) {
@@ -1447,6 +1498,8 @@ int emux_apply_rs232net(int enabled, int mode, int interface,
     rs232net_set_hayes_audio_mode(BMX_HAYES_AUDIO_OFF);
     switch (machine_class) {
       case VICE_MACHINE_C64:
+      case VICE_MACHINE_C64SC:
+      case VICE_MACHINE_SCPU64:
       case VICE_MACHINE_C128:
       case VICE_MACHINE_VIC20:
         BMC64_RS232_DEBUG("disable UserportDevice=none");
@@ -1497,6 +1550,8 @@ int emux_apply_rs232net(int enabled, int mode, int interface,
 
   switch (machine_class) {
     case VICE_MACHINE_C64:
+    case VICE_MACHINE_C64SC:
+    case VICE_MACHINE_SCPU64:
     case VICE_MACHINE_C128:
     case VICE_MACHINE_VIC20:
       if (interface == BMX_RS232_INTERFACE_USERPORT ||
@@ -1670,6 +1725,8 @@ void emux_add_userport_joys(struct menu_item* parent) {
 uint8_t circle_get_userport_ddr(void) {
   switch (machine_class) {
     case VICE_MACHINE_C64:
+    case VICE_MACHINE_C64SC:
+    case VICE_MACHINE_SCPU64:
     case VICE_MACHINE_C128:
     case VICE_MACHINE_VIC20:
     case VICE_MACHINE_PET:
@@ -1684,6 +1741,8 @@ uint8_t circle_get_userport_ddr(void) {
 uint8_t circle_get_userport(void) {
   switch (machine_class) {
     case VICE_MACHINE_C64:
+    case VICE_MACHINE_C64SC:
+    case VICE_MACHINE_SCPU64:
     case VICE_MACHINE_C128:
     case VICE_MACHINE_VIC20:
     case VICE_MACHINE_PET:
@@ -1698,6 +1757,8 @@ uint8_t circle_get_userport(void) {
 void circle_set_userport(uint8_t value) {
   switch (machine_class) {
     case VICE_MACHINE_C64:
+    case VICE_MACHINE_C64SC:
+    case VICE_MACHINE_SCPU64:
     case VICE_MACHINE_C128:
     case VICE_MACHINE_VIC20:
     case VICE_MACHINE_PET:

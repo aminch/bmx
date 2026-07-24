@@ -5,7 +5,7 @@ current BMX port. It distinguishes between sources that are vendored in
 this repository, sources downloaded by build/staging scripts, and sources used
 only as implementation references.
 
-Last checked: 2026-06-15
+Last checked: 2026-07-19
 
 ## BMC64 upstream
 
@@ -73,8 +73,9 @@ the modem core to VICE RS232/ACIA/Userport I/O and Circle sockets.
 
 The Pi4/Pi5 staging scripts build `utils/c64/utils.d64` from
 `utils-disk/c64/` using `c1541`. The generated disk image is staged onto the
-boot partition and attached as drive 9 by default when running the C64
-emulator. The generated `utils.d64` is not stored in git.
+boot partition. It is initially selected for drive 8, and can be changed or
+disabled under `Drives > Default disk`. The generated `utils.d64` is not
+stored in git.
 
 ## Circle and circle-stdlib
 
@@ -94,7 +95,8 @@ emulator. The generated `utils.d64` is not stored in git.
 
 Both Pi4 and Pi5 build helpers extract the same pinned source archive into
 separate build directories so each board can be configured independently without
-re-downloading Circle sources.
+re-downloading Circle sources. BMX changes are then applied from
+`third_party/circle-stdlib-patches/`.
 
 ### Circle submodule inside circle-stdlib
 
@@ -109,6 +111,48 @@ re-downloading Circle sources.
 | Commit | `6177984e30fac5e65582d171d43f1563368a94ac` |
 | Commit URL | https://github.com/rsta2/circle/commit/6177984e30fac5e65582d171d43f1563368a94ac |
 | Annotated tag object | `b4728d14738344d9b383585597776f926c95aec0` |
+
+### Mbed TLS replacement inside circle-stdlib
+
+| Item | Value |
+| --- | --- |
+| Role | TLS, X.509 and cryptographic implementation for the BMX updater |
+| Upstream repository | https://github.com/Mbed-TLS/mbedtls |
+| Release/tag | `mbedtls-3.6.7` (3.6 LTS) |
+| Release date | 2026-07-07 |
+| Release archive | https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2 |
+| SHA-256 | `a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6` |
+| Source archive | `third_party/source-cache/mbedtls-3.6.7.tar.bz2` |
+| Checksum registry | `third_party/source-cache/SHA256SUMS` |
+| License | Apache-2.0 OR GPL-2.0-or-later |
+| Staged license file | `licenses/mbedtls.txt` |
+
+The official archive replaces Circle stdlib v20's bundled Mbed TLS 2.28.10
+tree deterministically before compilation. Version 2.28 is no longer a
+maintained branch; upstream states that the 3.6 LTS line is maintained until
+March 2027. The build helper requires the repository-local archive, verifies
+its pinned checksum, validates the archive layout and records its source hash
+in each generated Circle tree. It never downloads source code.
+
+Circle compatibility code remains in
+`third_party/circle-stdlib-patches/0011-mbedtls-3.6.7-compat.patch`; the upstream
+Mbed TLS source is not embedded into that patch.
+
+## miniz raw-Deflate decoder
+
+| Item | Value |
+| --- | --- |
+| Role | Allocation-free raw-Deflate decoder for the strict updater ZIP reader |
+| Local path | `third_party/miniz` |
+| Upstream | https://github.com/richgel999/miniz |
+| Release | `3.1.2` |
+| Release archive SHA-256 | `f0446d863f9c19926ad9483c523fdc42e42b8d4a6a431d27e09d49c79a140d9a` |
+| License | `third_party/miniz/LICENSE` |
+
+The vendored `miniz.c` and `miniz.h` are byte-identical upstream files. BMX
+compiles only the narrow profile in `miniz_tinfl.c`; ZIP records, paths,
+limits, CRC and signed inventory are validated by BMX itself. Provenance and
+individual source hashes are recorded in `third_party/miniz/README.bmx.md`.
 
 ## Raspberry Pi firmware files
 
@@ -188,8 +232,11 @@ compiler is already available in `PATH`.
 
 ```sh
 git remote -v
-sha256sum -c third_party/source-cache/SHA256SUMS
+sha256sum third_party/source-cache/mbedtls-3.6.7.tar.bz2
 tar -tzf third_party/source-cache/circle-stdlib-v20-a4fbed9b-full.tar.gz | grep '^circle-stdlib/libs/circle/Rules.mk$'
+tar -tjf third_party/source-cache/mbedtls-3.6.7.tar.bz2 | grep '^mbedtls-3.6.7/include/mbedtls/version.h$'
+grep MBEDTLS_VERSION_STRING build/pi4/circle-stdlib/libs/mbedtls/include/mbedtls/build_info.h
+grep MBEDTLS_VERSION_STRING build/pi5/circle-stdlib/libs/mbedtls/include/mbedtls/build_info.h
 git ls-remote https://github.com/raspberrypi/linux.git refs/heads/rpi-6.12.y
 git ls-remote https://github.com/raspberrypi/firmware.git refs/heads/master
 git ls-remote https://github.com/VICE-Team/svn-mirror.git refs/tags/3.10.0
