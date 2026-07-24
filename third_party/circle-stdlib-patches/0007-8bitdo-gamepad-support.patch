@@ -23,7 +23,7 @@ new file mode 100644
 index 00000000..ca04d1b2
 --- /dev/null
 +++ b/libs/circle/include/circle/usb/usbgamepad8bitdo.h
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,27 @@
 +//
 +// usbgamepad8bitdo.h
 +//
@@ -50,6 +50,23 @@ index 00000000..ca04d1b2
 +	boolean InitializeDevice (void);
 +};
 +
++#endif
+\ No newline at end of file
+diff --git a/libs/circle/include/circle/usb/usbgamepad8bitdoultimatec.h b/libs/circle/include/circle/usb/usbgamepad8bitdoultimatec.h
+new file mode 100644
+index 00000000..a93a3927
+--- /dev/null
++++ b/libs/circle/include/circle/usb/usbgamepad8bitdoultimatec.h
+@@ -0,0 +1,19 @@
++//
++// usbgamepad8bitdoultimatec.h
++//
++
++#ifndef _circle_usb_usbgamepad8bitdoultimatec_h
++#define _circle_usb_usbgamepad8bitdoultimatec_h
++
++#include <circle/usb/usbgamepadxbox360.h>
++
 +class CUSBGamePad8BitDoUltimateCDevice : public CUSBGamePadXbox360Device
 +{
 +public:
@@ -60,7 +77,6 @@ index 00000000..ca04d1b2
 +};
 +
 +#endif
-\ No newline at end of file
 diff --git a/libs/circle/include/circle/usb/usbgamepadxbox360.h b/libs/circle/include/circle/usb/usbgamepadxbox360.h
 index 6ca080be..fb520cf9 100644
 --- a/libs/circle/include/circle/usb/usbgamepadxbox360.h
@@ -88,7 +104,7 @@ index 14471753..1d26f7a0 100644
  OBJS	= lan7800.o smsc951x.o usbbluetooth.o usbcdcethernet.o usbfloppydevice.o \
  	  usbconfigparser.o usbdevice.o usbdevicefactory.o usbendpoint.o usbfunction.o \
 -	  usbgamepad.o usbgamepadps3.o usbgamepadps4.o usbgamepadstandard.o usbgamepadswitchpro.o \
-+	  usbgamepad.o usbgamepad8bitdo.o usbgamepadps3.o usbgamepadps4.o usbgamepadstandard.o usbgamepadswitchpro.o \
++	  usbgamepad.o usbgamepad8bitdo.o usbgamepad8bitdoultimatec.o usbgamepadps3.o usbgamepadps4.o usbgamepadstandard.o usbgamepadswitchpro.o \
  	  usbgamepadxbox360.o usbgamepadxboxone.o usbhiddevice.o usbhostcontroller.o \
  	  usbkeyboard.o usbmassdevice.o usbmidi.o usbmidihost.o usbmouse.o usbprinter.o usbrequest.o \
  	  usbstandardhub.o usbstring.o usbserial.o usbserialhost.o usbserialch341.o usbserialcp210x.o \
@@ -208,11 +224,12 @@ diff --git a/libs/circle/lib/usb/usbdevicefactory.cpp b/libs/circle/lib/usb/usbd
 index 75210581..d8d0a384 100644
 --- a/libs/circle/lib/usb/usbdevicefactory.cpp
 +++ b/libs/circle/lib/usb/usbdevicefactory.cpp
-@@ -34,6 +34,7 @@
+@@ -34,6 +34,8 @@
  #include <circle/usb/usbgamepadstandard.h>
  #include <circle/usb/usbgamepadps3.h>
  #include <circle/usb/usbgamepadps4.h>
 +#include <circle/usb/usbgamepad8bitdo.h>
++#include <circle/usb/usbgamepad8bitdoultimatec.h>
  #include <circle/usb/usbgamepadxbox360.h>
  #include <circle/usb/usbgamepadxboxone.h>
  #include <circle/usb/usbgamepadswitchpro.h>
@@ -253,7 +270,7 @@ new file mode 100644
 index 00000000..7e60a948
 --- /dev/null
 +++ b/libs/circle/lib/usb/usbgamepad8bitdo.cpp
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,46 @@
 +//
 +// usbgamepad8bitdo.cpp
 +//
@@ -273,21 +290,6 @@ index 00000000..7e60a948
 +CUSBGamePad8BitDoDevice::~CUSBGamePad8BitDoDevice (void)
 +{
 +}
-+
-+CUSBGamePad8BitDoUltimateCDevice::CUSBGamePad8BitDoUltimateCDevice (CUSBFunction *pFunction)
-+: CUSBGamePadXbox360Device (pFunction)
-+{
-+}
-+
-+CUSBGamePad8BitDoUltimateCDevice::~CUSBGamePad8BitDoUltimateCDevice (void)
-+{
-+}
-+
-+boolean CUSBGamePad8BitDoUltimateCDevice::Configure (void)
-+{
-+	return ConfigureGamePad (TRUE, 32);
-+}
-+
 +boolean CUSBGamePad8BitDoDevice::Configure (void)
 +{
 +	return ConfigureGamePad (FALSE, USB_GAMEPAD_8BITDO_REPORT_SIZE);
@@ -314,6 +316,31 @@ index 00000000..7e60a948
 +	}
 +
 +	return TRUE;
++}
+diff --git a/libs/circle/lib/usb/usbgamepad8bitdoultimatec.cpp b/libs/circle/lib/usb/usbgamepad8bitdoultimatec.cpp
+new file mode 100644
+index 00000000..a93a3927
+--- /dev/null
++++ b/libs/circle/lib/usb/usbgamepad8bitdoultimatec.cpp
+@@ -0,0 +1,19 @@
++//
++// usbgamepad8bitdoultimatec.cpp
++//
++
++#include <circle/usb/usbgamepad8bitdoultimatec.h>
++
++CUSBGamePad8BitDoUltimateCDevice::CUSBGamePad8BitDoUltimateCDevice (CUSBFunction *pFunction)
++: CUSBGamePadXbox360Device (pFunction)
++{
++}
++
++CUSBGamePad8BitDoUltimateCDevice::~CUSBGamePad8BitDoUltimateCDevice (void)
++{
++}
++
++boolean CUSBGamePad8BitDoUltimateCDevice::Configure (void)
++{
++	return ConfigureGamePad (TRUE, 32);
 +}
 diff --git a/libs/circle/lib/usb/usbgamepadxbox360.cpp b/libs/circle/lib/usb/usbgamepadxbox360.cpp
 index 2064c369..bc9545a5 100644
@@ -387,9 +414,9 @@ index 7ca87b11..749d16c3 100644
  	{
 +		CLogger::Get ()->Write (FromUSBHID, LogError,
 +					"HID interface %u has no interrupt input endpoint", GetInterfaceNumber ());
-		ConfigurationError (FromUSBHID);
+ 		ConfigurationError (FromUSBHID);
 
-		return FALSE;
+ 		return FALSE;
 	}
 diff --git a/libs/circle/lib/usb/usbstandardhub.cpp b/libs/circle/lib/usb/usbstandardhub.cpp
 index c8a080be..32623589 100644
