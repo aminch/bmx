@@ -1,4 +1,4 @@
-fast=true pi5kms=1 machine_timing=pal-hdmi framebuffer_depth=16 hdmi_group=1 hdmi_mode=19 scaling_params=384,240,1152,720 usbpowerdelay=1000
+fast=true pi5kms=1 machine_timing=pal-hdmi framebuffer_depth=16 hdmi_group=1 hdmi_mode=19 scaling_params=384,240,1152,720
 
 # DO NOT EDIT - This file is no longer edited by hand. Use the
 # machines.txt to set both config.txt and cmdline.txt params for
