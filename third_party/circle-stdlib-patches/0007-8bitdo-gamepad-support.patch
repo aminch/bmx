@@ -23,7 +23,7 @@ new file mode 100644
 index 00000000..ca04d1b2
 --- /dev/null
 +++ b/libs/circle/include/circle/usb/usbgamepad8bitdo.h
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,36 @@
 +//
 +// usbgamepad8bitdo.h
 +//
@@ -47,11 +47,7 @@ index 00000000..ca04d1b2
 +	}
 +
 +protected:
-+	void ReportHandler (const u8 *pReport, unsigned nReportSize);
 +	boolean InitializeDevice (void);
-+
-+private:
-+	unsigned m_nLoggedReports;
 +};
 +
 +class CUSBGamePad8BitDoUltimateCDevice : public CUSBGamePadXbox360Device
@@ -257,14 +253,12 @@ new file mode 100644
 index 00000000..7e60a948
 --- /dev/null
 +++ b/libs/circle/lib/usb/usbgamepad8bitdo.cpp
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,61 @@
 +//
 +// usbgamepad8bitdo.cpp
 +//
 +
 +#include <circle/usb/usbgamepad8bitdo.h>
-+#include <circle/usb/usbhid.h>
-+#include <circle/debug.h>
 +#include <circle/logger.h>
 +
 +static const char FromUSBPad8BitDo[] = "usbpad8bitdo";
@@ -272,8 +266,7 @@ index 00000000..7e60a948
 +#define USB_GAMEPAD_8BITDO_REPORT_SIZE 20
 +
 +CUSBGamePad8BitDoDevice::CUSBGamePad8BitDoDevice (CUSBFunction *pFunction)
-+: CUSBGamePadXbox360Device (pFunction),
-+	m_nLoggedReports (0)
++: CUSBGamePadXbox360Device (pFunction)
 +{
 +}
 +
@@ -297,63 +290,7 @@ index 00000000..7e60a948
 +
 +boolean CUSBGamePad8BitDoDevice::Configure (void)
 +{
-+	CLogger::Get ()->Write (FromUSBPad8BitDo, LogNotice,
-+				  "Configuring interface %u (%u/%u/%u, %u endpoint(s))",
-+				  GetInterfaceNumber (), GetInterfaceClass (), GetInterfaceSubClass (),
-+				  GetInterfaceProtocol (), GetNumEndpoints ());
-+
-+	TUSBHIDDescriptor *pHIDDesc = (TUSBHIDDescriptor *) GetDescriptor (DESCRIPTOR_HID);
-+	if (pHIDDesc != 0 && pHIDDesc->wReportDescriptorLength > 0)
-+	{
-+		u16 usLength = pHIDDesc->wReportDescriptorLength;
-+		u8 *pDescriptor = new u8[usLength];
-+		assert (pDescriptor != 0);
-+
-+		int nResult = GetHost ()->GetDescriptor (
-+			GetEndpoint0 (), pHIDDesc->bReportDescriptorType, DESCRIPTOR_INDEX_DEFAULT,
-+			pDescriptor, usLength, REQUEST_IN | REQUEST_TO_INTERFACE, GetInterfaceNumber ());
-+		CLogger::Get ()->Write (FromUSBPad8BitDo, LogNotice,
-+					  "HID report descriptor: requested %u, received %d byte(s)",
-+					  usLength, nResult);
-+		if (nResult > 0)
-+		{
-+			debug_hexdump (pDescriptor, nResult, FromUSBPad8BitDo);
-+		}
-+
-+		delete [] pDescriptor;
-+	}
-+	else
-+	{
-+		CLogger::Get ()->Write (FromUSBPad8BitDo, LogError, "No HID report descriptor");
-+	}
-+
-+	boolean bResult = ConfigureGamePad (FALSE, USB_GAMEPAD_8BITDO_REPORT_SIZE);
-+	if (!bResult)
-+	{
-+		CLogger::Get ()->Write (FromUSBPad8BitDo, LogError, "Cannot start input request");
-+	}
-+
-+	return bResult;
-+}
-+
-+void CUSBGamePad8BitDoDevice::ReportHandler (const u8 *pReport, unsigned nReportSize)
-+{
-+	if (pReport != 0 && m_nLoggedReports++ < 32)
-+	{
-+		if (m_nLoggedReports == 1)
-+		{
-+			CLogger::Get ()->Write (FromUSBPad8BitDo, LogNotice,
-+						  "Report %u received (%u byte(s), %02X %02X)",
-+						  m_nLoggedReports, nReportSize,
-+						  pReport[0], nReportSize > 1 ? pReport[1] : 0);
-+		}
-+
-+		/*CLogger::Get ()->Write (FromUSBPad8BitDo, LogNotice,
-+					  "Report %u (%u byte(s))", m_nLoggedReports, nReportSize);
-+		debug_hexdump (pReport, nReportSize, FromUSBPad8BitDo);*/
-+	}
-+
-+	CUSBGamePadXbox360Device::ReportHandler (pReport, nReportSize);
++	return ConfigureGamePad (FALSE, USB_GAMEPAD_8BITDO_REPORT_SIZE);
 +}
 +
 +boolean CUSBGamePad8BitDoDevice::InitializeDevice (void)
@@ -378,7 +315,6 @@ index 00000000..7e60a948
 +
 +	return TRUE;
 +}
-\ No newline at end of file
 diff --git a/libs/circle/lib/usb/usbgamepadxbox360.cpp b/libs/circle/lib/usb/usbgamepadxbox360.cpp
 index 2064c369..bc9545a5 100644
 --- a/libs/circle/lib/usb/usbgamepadxbox360.cpp
