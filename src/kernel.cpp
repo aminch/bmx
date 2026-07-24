@@ -704,6 +704,14 @@ if (static_kernel->circle_get_ticks() - entry_start >= entry_delay) {
       value |= emu_add_button_values(nDeviceIndex, b);
       emu_set_joy_usb_interrupt(nDeviceIndex, value);
     }
+  } else if (prev_buttons[nDeviceIndex] != b) {
+    prev_buttons[nDeviceIndex] = b;
+    handle_button_function(ui_activated, nDeviceIndex, b);
+
+    if (!ui_activated) {
+      emu_set_joy_usb_interrupt(nDeviceIndex,
+                                emu_add_button_values(nDeviceIndex, b));
+    }
   }
 }
 
