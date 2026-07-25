@@ -1,5 +1,5 @@
 diff --git a/libs/circle/lib/usb/usbstring.cpp b/libs/circle/lib/usb/usbstring.cpp
-index 54e9bd47..bb958f0c 100644
+index 54e9bd47..ae567ada 100644
 --- a/libs/circle/lib/usb/usbstring.cpp
 +++ b/libs/circle/lib/usb/usbstring.cpp
 @@ -25,6 +25,7 @@
@@ -10,12 +10,16 @@ index 54e9bd47..bb958f0c 100644
  #define USBSTR_DEFAULT_LANGID	0x409
  
  CUSBString::CUSBString (CUSBDevice *pDevice)
-@@ -71,19 +72,25 @@ boolean CUSBString::GetFromDescriptor (u8 ucID, u16 usLanguageID)
+@@ -71,19 +72,31 @@ boolean CUSBString::GetFromDescriptor (u8 ucID, u16 usLanguageID)
  	assert (ucID > 0);
  
  	delete [] m_pUSBString;
 -	m_pUSBString = (TUSBStringDescriptor *) new u8[USBSTR_MIN_LENGTH];
++#if RASPPI >= 4
 +	const unsigned nRequestLength = USBSTR_MAX_LENGTH;
++#else
++	const unsigned nRequestLength = USBSTR_MIN_LENGTH;
++#endif
 +	m_pUSBString = (TUSBStringDescriptor *) new u8[nRequestLength];
  	assert (m_pUSBString != 0);
  
@@ -34,14 +38,16 @@ index 54e9bd47..bb958f0c 100644
  	}
  
  	u8 ucLength = m_pUSBString->bLength;
++#if RASPPI >= 4
 +	if ((unsigned) nResult < ucLength)
 +	{
 +		return FALSE;
 +	}
++#endif
  	if (   ucLength < 2
  	    || (ucLength & 1) != 0
  	    || m_pUSBString->bDescriptorType != DESCRIPTOR_STRING)
-@@ -91,7 +98,7 @@ boolean CUSBString::GetFromDescriptor (u8 ucID, u16 usLanguageID)
+@@ -91,7 +104,7 @@ boolean CUSBString::GetFromDescriptor (u8 ucID, u16 usLanguageID)
  		return FALSE;
  	}
  
@@ -50,7 +56,7 @@ index 54e9bd47..bb958f0c 100644
  	{
  		delete m_pUSBString;
  		m_pUSBString = (TUSBStringDescriptor *) new u8[ucLength];
-@@ -118,7 +125,7 @@ boolean CUSBString::GetFromDescriptor (u8 ucID, u16 usLanguageID)
+@@ -118,7 +131,7 @@ boolean CUSBString::GetFromDescriptor (u8 ucID, u16 usLanguageID)
  	assert ((m_pUSBString->bLength & 1) == 0);
  	size_t nLength = (m_pUSBString->bLength-2) / 2;
  
@@ -59,12 +65,16 @@ index 54e9bd47..bb958f0c 100644
  	char Buffer[nLength+1];
  	
  	for (unsigned i = 0; i < nLength; i++)
-@@ -149,13 +156,15 @@ const char *CUSBString::Get (void) const
+@@ -149,13 +162,19 @@ const char *CUSBString::Get (void) const
  
  u16 CUSBString::GetLanguageID (void)
  {
 -	TUSBStringDescriptor *pLanguageIDs = (TUSBStringDescriptor *) new u8[USBSTR_MIN_LENGTH];
++#if RASPPI >= 4
 +	const unsigned nRequestLength = USBSTR_MAX_LENGTH;
++#else
++	const unsigned nRequestLength = USBSTR_MIN_LENGTH;
++#endif
 +	TUSBStringDescriptor *pLanguageIDs = (TUSBStringDescriptor *) new u8[nRequestLength];
  	assert (pLanguageIDs != 0);
  
@@ -79,20 +89,22 @@ index 54e9bd47..bb958f0c 100644
  	{
  		delete [] pLanguageIDs;
  
-@@ -163,6 +172,12 @@ u16 CUSBString::GetLanguageID (void)
+@@ -163,6 +182,14 @@ u16 CUSBString::GetLanguageID (void)
  	}
  
  	u8 ucLength = pLanguageIDs->bLength;
++#if RASPPI >= 4
 +	if ((unsigned) nResult < ucLength)
 +	{
 +		delete [] pLanguageIDs;
 +
 +		return USBSTR_DEFAULT_LANGID;
 +	}
++#endif
  	if (   ucLength < 4
  	    || (ucLength & 1) != 0
  	    || pLanguageIDs->bDescriptorType != DESCRIPTOR_STRING)
-@@ -172,7 +187,7 @@ u16 CUSBString::GetLanguageID (void)
+@@ -172,7 +199,7 @@ u16 CUSBString::GetLanguageID (void)
  		return USBSTR_DEFAULT_LANGID;
  	}
  
