@@ -453,11 +453,6 @@ bool ViceStdioApp::Initialize(void) {
   if (!mUSBHCII.Initialize()) {
     return false;
   }
-#if RASPPI >= 4
-  // xHCI transaction errors halt an endpoint. Recovery uses synchronous
-  // commands and therefore has to run outside the USB interrupt handler.
-  mUSBHCII.ProcessRecoveries();
-#endif
   EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
                 "boot: usb ready");
   return true;

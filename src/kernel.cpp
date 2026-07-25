@@ -368,8 +368,25 @@ long func_to_keycode(int btn_func) {
 
 }
 
+class CKernel::USBPlugAndPlayTask : public CTask {
+public:
+  explicit USBPlugAndPlayTask(CKernel *kernel) : mKernel(kernel) {
+    SetName("usbpnp");
+  }
+
+  void Run(void) override {
+    for (;;) {
+      mKernel->UpdateUSBPlugAndPlay();
+      CScheduler::Get()->MsSleep(100);
+    }
+  }
+
+private:
+  CKernel *mKernel;
+};
+
 CKernel::CKernel(void)
-    : ViceStdioApp("vice"), mViceSound(nullptr),
+    : ViceStdioApp("vice"), mViceSound(nullptr), mUSBPlugAndPlayTask(nullptr),
       mUSBMouse(nullptr), mUSBServicesReady(FALSE),
       mNumJoy(emu_get_num_joysticks()),
       mVolume(100), mSoundOutputPriority(ViceSound::DefaultOutputPriority()),
@@ -719,6 +736,29 @@ if (static_kernel->circle_get_ticks() - entry_start >= entry_delay) {
   }
 }
 
+void CKernel::MouseRemovedHandler(CDevice *pDevice, void *pContext) {
+  if (static_kernel) static_kernel->mUSBMouse = 0;
+}
+void CKernel::KeyRemovedHandler(CDevice *pDevice, void *pContext) {
+  if (static_kernel) {
+    for (int i = 0; i < MAX_USB_DEVICES; i++) {
+      if (static_kernel->mUSBKeyboards[i] == pDevice) {
+        static_kernel->mUSBKeyboards[i] = 0;
+      }
+    }
+  }
+}
+void CKernel::GamePadRemovedHandler(CDevice *pDevice, void *pContext) {
+  // Just let the update scan clear nulls
+  if (static_kernel) {
+     for (int i=0; i<MAX_USB_DEVICES; i++) {
+         if (static_kernel->mUSBGamepads[i] == pDevice) {
+             static_kernel->mUSBGamepads[i] = 0;
+         }
+     }
+  }
+}
+
 void CKernel::SetupUSBKeyboard() {
   unsigned num_keyboards = 0;
   for (unsigned i = 0; i < MAX_USB_DEVICES; i++) {
@@ -730,6 +770,7 @@ void CKernel::SetupUSBKeyboard() {
 
     if (pKeyboard != mUSBKeyboards[i]) {
       if (pKeyboard) {
+        pKeyboard->RegisterRemovedHandler(KeyRemovedHandler);
         pKeyboard->RegisterKeyStatusHandlerRaw(KeyStatusHandlerRaw);
         printf("usb: registered keyboard ukbd%u\r\n", i + 1);
       }
@@ -750,6 +791,7 @@ void CKernel::SetupUSBMouse() {
 
   if (pMouse != mUSBMouse) {
     if (pMouse) {
+      pMouse->RegisterRemovedHandler(MouseRemovedHandler);
       pMouse->RegisterStatusHandler(MouseStatusHandler);
       printf("usb: registered mouse1\r\n");
     }
@@ -771,6 +813,7 @@ void CKernel::SetupUSBGamepads() {
 
     if (game_pad != mUSBGamepads[i]) {
       if (game_pad) {
+        game_pad->RegisterRemovedHandler(GamePadRemovedHandler);
         game_pad->RegisterStatusHandler(GamePadStatusHandler);
         printf("usb: registered gamepad upad%u\r\n", i + 1);
       }
@@ -792,6 +835,14 @@ void CKernel::SetupUSBGamepads() {
 
   // Tell the emulator what we found
   emu_set_gamepad_info(num_pads, num_buttons, num_axes, num_hats);
+}
+
+void CKernel::UpdateUSBPlugAndPlay() {
+  if (mUSBHCII.UpdatePlugAndPlay()) {
+    SetupUSBKeyboard();
+    SetupUSBMouse();
+    SetupUSBGamepads();
+  }
 }
 
 ViceApp::TShutdownMode CKernel::Run(void) {
@@ -816,6 +867,7 @@ ViceApp::TShutdownMode CKernel::Run(void) {
   printf("boot: usb plug-and-play ready\r\n");
 
 #ifndef BMC64_USE_EMU_MULTICORE
+  mUSBPlugAndPlayTask = new USBPlugAndPlayTask(this);
   printf("boot: launching emulator on core 0\r\n");
   mEmulatorCore->LaunchEmulator(mTimingOption);
   printf("boot: emulator returned\r\n");
@@ -824,15 +876,15 @@ ViceApp::TShutdownMode CKernel::Run(void) {
   // usb or gpio.
   printf("Core 0 idle\n");
 
+  while(1) {
+    UpdateUSBPlugAndPlay();
 #if AARCH == 64
-  asm("dsb sy\n\t"
-      "1: wfi\n\t"
-      "b 1b\n\t");
+    asm("dsb sy\n\twfi");
 #else
-  asm("dsb\n\t"
-      "1: wfi\n\t"
-      "b 1b\n\t");
+    asm("dsb\n\twfi");
 #endif
+  }
+
 #endif
   return ShutdownHalt;
 }
@@ -1290,18 +1342,6 @@ int CKernel::circle_sound_bufferspace(void) {
 }
 
 void CKernel::circle_yield(void) {
-  if (__atomic_load_n(&mUSBServicesReady, __ATOMIC_ACQUIRE)) {
-    boolean usb_changed = mUSBHCII.UpdatePlugAndPlay();
-#if RASPPI >= 4
-    mUSBHCII.ProcessRecoveries();
-#endif
-    if (usb_changed) {
-      printf("usb: plug-and-play update\r\n");
-      SetupUSBKeyboard();
-      SetupUSBMouse();
-      SetupUSBGamepads();
-    }
-  }
   CScheduler::Get()->Yield();
 }
 

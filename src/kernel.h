@@ -141,10 +141,13 @@ public:
 			int bilinear_interpolation);
 
 private:
+  class USBPlugAndPlayTask;
+
   void InitSound();
   void SetupUSBKeyboard();
   void SetupUSBMouse();
   void SetupUSBGamepads();
+  void UpdateUSBPlugAndPlay();
   int ReadDebounced(int pinIndex);
   void ScanKeyboard();
   void ReadJoystick(int device, int gpioConfig);
@@ -153,6 +156,12 @@ private:
   void ReadWriteUserport();
 
   ViceSound *mViceSound;
+  USBPlugAndPlayTask *mUSBPlugAndPlayTask;
+
+  static void MouseRemovedHandler(CDevice *pDevice, void *pContext);
+  static void KeyRemovedHandler(CDevice *pDevice, void *pContext);
+  static void GamePadRemovedHandler(CDevice *pDevice, void *pContext);
+
   CUSBKeyboardDevice *mUSBKeyboards[MAX_USB_DEVICES];
   CMouseDevice *mUSBMouse;
   CUSBGamePadDevice *mUSBGamepads[MAX_USB_DEVICES];
