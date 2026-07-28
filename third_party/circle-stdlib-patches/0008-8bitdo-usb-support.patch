@@ -265,7 +265,7 @@ index 7521058..00ead3a 100644
  		{
  			pResult = new CUSBKeyboardDevice (pParent);
  		}
-@@ -134,6 +141,18 @@ CUSBFunction *CUSBDeviceFactory::GetDevice (CUSBFunction *pParent, CString *pNam
+@@ -134,6 +141,19 @@ CUSBFunction *CUSBDeviceFactory::GetDevice (CUSBFunction *pParent, CString *pNam
  	{
  		pResult = new CUSBGamePadXbox360Device (pParent);
  	}
@@ -274,7 +274,8 @@ index 7521058..00ead3a 100644
 +		pResult = new CUSBGamePad8BitDoXInputDevice (pParent);
 +	}
 +	else if (pName->Compare ("ven2dc8-3107") == 0	// 8BitDo idle receiver
-+	      || pName->Compare ("ven2dc8-3109") == 0)	// 8BitDo idle receiver
++	      || pName->Compare ("ven2dc8-3109") == 0	// 8BitDo idle receiver
++	      || pName->Compare ("ven2dc8-3016") == 0)	// 8BitDo idle receiver
 +	{
 +		// The receiver exposes a non-gamepad HID personality while no
 +		// controller is paired. Keep it configured so Plug&Play can observe
