@@ -285,6 +285,7 @@ static char usb_x_name[MAX_USB_DEVICES][16];
 static char usb_y_name[MAX_USB_DEVICES][16];
 static char usb_x_t_name[MAX_USB_DEVICES][16];
 static char usb_y_t_name[MAX_USB_DEVICES][16];
+static char usb_mapping_name[MAX_USB_DEVICES][24];
 
 const int num_disk_ext = 15;
 static char disk_filt_ext[15][5] = {".d64", ".d67", ".d71", ".d80", ".d81",
@@ -716,6 +717,10 @@ static int files_left_right_listener(struct menu_item* parent,
 
 static void show_files(DirType dir_type, FileFilter filter, int menu_id,
                        int reset_cur_pos) {
+  int has_name_field =
+      menu_id == MENU_SAVE_SNAP_FILE ||
+      (menu_id >= MENU_CREATE_D64_FILE && menu_id <= MENU_CREATE_TAP_FILE);
+
   // Show files
   struct menu_item *file_root = ui_push_menu(-1, -1);
   if (file_root == NULL) {
@@ -729,8 +734,7 @@ static void show_files(DirType dir_type, FileFilter filter, int menu_id,
   file_root->cursor_listener_func = files_cursor_listener;
   file_root->left_right_listener_func = files_left_right_listener;
 
-  if (menu_id == MENU_SAVE_SNAP_FILE ||
-      (menu_id >= MENU_CREATE_D64_FILE && menu_id <= MENU_CREATE_TAP_FILE)) {
+  if (has_name_field) {
     struct menu_item *file_name_item = ui_menu_add_text_field(
        menu_id, file_root, "Enter name:", "");
     file_name_item->sub_id = MENU_SUB_PICK_FILE;
@@ -744,7 +748,12 @@ static void show_files(DirType dir_type, FileFilter filter, int menu_id,
   }
   list_files(file_root, dir_type, filter, menu_id);
 
-  if (reset_cur_pos) {
+  if (has_name_field) {
+     // A fresh save/create dialog must always start in its empty name field.
+     // The remembered directory position may come from a load/attach dialog,
+     // whose list has no leading text field.
+     ui_set_cur_pos(0);
+  } else if (reset_cur_pos) {
      current_dir_pos[dir_type] = 0;
   } else {
      // Position cursor to last known location for this dir type.
@@ -2807,6 +2816,7 @@ static int save_settings() {
   }
 
   for (int k = 0;k < MAX_USB_DEVICES; k++) {
+    fprintf(fp, "usb_mapping_%d=%d\n", k, menu_usb_mapping_mode(k));
     fprintf(fp, "usb_%d=%d\n", k, usb_pref[k]);
     fprintf(fp, "usb_x_%d=%d\n", k, usb_x_axis[k]);
     fprintf(fp, "usb_y_%d=%d\n", k, usb_y_axis[k]);
@@ -3047,6 +3057,8 @@ static void load_settings() {
   }
 
   if (fp == NULL) {
+    const int not_loaded[MAX_USB_DEVICES] = {0, 0, 0, 0};
+    menu_usb_mapping_finish_load(not_loaded, not_loaded, not_loaded);
     if (emux_machine_class == BMC64_MACHINE_CLASS_SCPU64) {
       load_sound_output_priority_setting("/settings.txt");
     }
@@ -3058,7 +3070,13 @@ static void load_settings() {
   size_t len;
   int value;
   int usb_btn_i[MAX_USB_DEVICES];
+  int usb_mapping_mode_loaded[MAX_USB_DEVICES];
+  int usb_mapping_loaded_mode[MAX_USB_DEVICES];
+  int usb_mapping_value_loaded[MAX_USB_DEVICES];
   memset(usb_btn_i, 0, sizeof(usb_btn_i));
+  memset(usb_mapping_mode_loaded, 0, sizeof(usb_mapping_mode_loaded));
+  memset(usb_mapping_loaded_mode, 0, sizeof(usb_mapping_loaded_mode));
+  memset(usb_mapping_value_loaded, 0, sizeof(usb_mapping_value_loaded));
 
   while (1) {
     char *line = fgets(name_value, 255, fp);
@@ -3333,25 +3351,38 @@ static void load_settings() {
             value = NUM_BUTTON_ASSIGNMENTS - 1;
          }
          usb_button_assignments[k][usb_btn_i[k]] = value;
+         usb_mapping_value_loaded[k] = 1;
          usb_btn_i[k]++;
          if (usb_btn_i[k] >= MAX_USB_BUTTONS) {
            usb_btn_i[k] = 0;
          }
        } else if (strcmp(name, usb_pref_name[k]) == 0) {
          usb_pref[k] = value;
+         usb_mapping_value_loaded[k] = 1;
        } else if (strcmp(name, usb_x_name[k]) == 0) {
          usb_x_axis[k] = value;
+         usb_mapping_value_loaded[k] = 1;
        } else if (strcmp(name, usb_y_name[k]) == 0) {
          usb_y_axis[k] = value;
+         usb_mapping_value_loaded[k] = 1;
        } else if (strcmp(name, usb_x_t_name[k]) == 0) {
          usb_x_thresh[k] = ((float)value) / 100.0f;
+         usb_mapping_value_loaded[k] = 1;
        } else if (strcmp(name, usb_y_t_name[k]) == 0) {
          usb_y_thresh[k] = ((float)value) / 100.0f;
+         usb_mapping_value_loaded[k] = 1;
+       } else if (strcmp(name, usb_mapping_name[k]) == 0) {
+         usb_mapping_loaded_mode[k] = value;
+         usb_mapping_mode_loaded[k] = 1;
        }
       }
     }
   }
   fclose(fp);
+
+  menu_usb_mapping_finish_load(usb_mapping_mode_loaded,
+                               usb_mapping_loaded_mode,
+                               usb_mapping_value_loaded);
 
   if (emux_machine_class == BMC64_MACHINE_CLASS_SCPU64 &&
       !sound_output_priority_loaded) {
@@ -5049,7 +5080,7 @@ void emu_get_usb_pref(int device, int *usb_pref_dst, int *x_axis, int *y_axis,
 
 // KEEP in sync with kernel.cpp, kbd.c, menu_usb.c
 static void set_hotkey_choices(struct menu_item *item) {
-  item->num_choices = 22;
+  item->num_choices = 23;
   strcpy(item->choices[HOTKEY_CHOICE_NONE], function_to_string(BTN_ASSIGN_UNDEF));
   strcpy(item->choices[HOTKEY_CHOICE_MENU], function_to_string(BTN_ASSIGN_MENU));
   strcpy(item->choices[HOTKEY_CHOICE_WARP], function_to_string(BTN_ASSIGN_WARP));
@@ -5072,6 +5103,7 @@ static void set_hotkey_choices(struct menu_item *item) {
   strcpy(item->choices[HOTKEY_CHOICE_ATTACH_DISK_9], function_to_string(BTN_ASSIGN_ATTACH_DISK_9));
   strcpy(item->choices[HOTKEY_CHOICE_ATTACH_DISK_10], function_to_string(BTN_ASSIGN_ATTACH_DISK_10));
   strcpy(item->choices[HOTKEY_CHOICE_ATTACH_DISK_11], function_to_string(BTN_ASSIGN_ATTACH_DISK_11));
+  strcpy(item->choices[HOTKEY_CHOICE_SID_FILTER_OSD], function_to_string(BTN_ASSIGN_SID_FILTER_OSD));
   item->choice_ints[HOTKEY_CHOICE_NONE] = BTN_ASSIGN_UNDEF;
   item->choice_ints[HOTKEY_CHOICE_MENU] = BTN_ASSIGN_MENU;
   item->choice_ints[HOTKEY_CHOICE_WARP] = BTN_ASSIGN_WARP;
@@ -5094,6 +5126,7 @@ static void set_hotkey_choices(struct menu_item *item) {
   item->choice_ints[HOTKEY_CHOICE_ATTACH_DISK_9] = BTN_ASSIGN_ATTACH_DISK_9;
   item->choice_ints[HOTKEY_CHOICE_ATTACH_DISK_10] = BTN_ASSIGN_ATTACH_DISK_10;
   item->choice_ints[HOTKEY_CHOICE_ATTACH_DISK_11] = BTN_ASSIGN_ATTACH_DISK_11;
+  item->choice_ints[HOTKEY_CHOICE_SID_FILTER_OSD] = BTN_ASSIGN_SID_FILTER_OSD;
 
   if (emux_machine_class == BMC64_MACHINE_CLASS_VIC20) {
      item->choice_disabled[HOTKEY_CHOICE_SWAP_PORTS] = 1;
@@ -5114,6 +5147,7 @@ static void set_hotkey_choices(struct menu_item *item) {
 
   if (emux_machine_class == BMC64_MACHINE_CLASS_PET) {
      item->choice_disabled[HOTKEY_CHOICE_ATTACH_CART] = 1;
+     item->choice_disabled[HOTKEY_CHOICE_SID_FILTER_OSD] = 1;
   }
 
   if (emux_machine_class == BMC64_MACHINE_CLASS_PLUS4EMU) {
@@ -5121,6 +5155,7 @@ static void set_hotkey_choices(struct menu_item *item) {
      item->choice_disabled[HOTKEY_CHOICE_ATTACH_DISK_9] = 1;
      item->choice_disabled[HOTKEY_CHOICE_ATTACH_DISK_10] = 1;
      item->choice_disabled[HOTKEY_CHOICE_ATTACH_DISK_11] = 1;
+     item->choice_disabled[HOTKEY_CHOICE_SID_FILTER_OSD] = 1;
   }
 }
 
@@ -5644,6 +5679,7 @@ void build_menu(struct menu_item *root) {
      sprintf (usb_y_name[k], "usb_y_%d", k);
      sprintf (usb_x_t_name[k], "usb_x_t_%d", k);
      sprintf (usb_y_t_name[k], "usb_y_t_%d", k);
+     sprintf (usb_mapping_name[k], "usb_mapping_%d", k);
   }
 
   attached_disk_name[0][0] = '\0';
@@ -5824,6 +5860,15 @@ void build_menu(struct menu_item *root) {
       ui_menu_add_button(MENU_CREATE_P64, parent, "P64...");
       ui_menu_add_button(MENU_CREATE_X64, parent, "X64...");
       //ui_menu_add_button(MENU_CREATE_DHD, parent, "DHD..."); // VICE doesn't do this
+
+    struct menu_item *drive_sound_parent =
+        ui_menu_add_folder(drive_parent, "Drive Sound");
+    drive_sounds_item = ui_menu_add_toggle(MENU_DRIVE_SOUND_EMULATION,
+                                           drive_sound_parent,
+                                           "Enabled", 0);
+    drive_sounds_vol_item = ui_menu_add_range(
+        MENU_DRIVE_SOUND_EMULATION_VOLUME, drive_sound_parent,
+        "Volume %", 0, 100, 5, 25);
   }
 
   parent = emux_add_cartridge_options(root);
@@ -5845,9 +5890,9 @@ void build_menu(struct menu_item *root) {
     tape_reset_with_machine_item =
       ui_menu_add_toggle(MENU_TAPE_RESET_WITH_MACHINE, tape_parent,
                          "Reset Tape with Machine Reset", tmp);
-    emux_add_tape_options(tape_parent);
 
     ui_menu_add_button(MENU_CREATE_TAP, parent, "Create empty Tape...");
+    emux_add_tape_options(parent);
 
   ui_menu_add_divider(root);
 
@@ -6123,13 +6168,16 @@ void build_menu(struct menu_item *root) {
                      "Custom HDMI/DPI mode timing calc...");
   }
 
-  parent = ui_menu_add_folder(root, "Sound");
+  struct menu_item *sound_parent = ui_menu_add_folder(root, "Sound");
+  struct menu_item *sound_output_parent =
+      ui_menu_add_folder(sound_parent, "Output");
 
-  volume_item = ui_menu_add_range(MENU_VOLUME, parent,
-      "Volume ", 0, 100, 1, 100);
+  volume_item = ui_menu_add_range(MENU_VOLUME, sound_output_parent,
+      "Volume", 0, 100, 1, 100);
 
   sound_output_priority_item = child =
-      ui_menu_add_multiple_choice(MENU_SOUND_OUTPUT_PRIORITY, parent,
+      ui_menu_add_multiple_choice(MENU_SOUND_OUTPUT_PRIORITY,
+                                  sound_output_parent,
                                   "Output Priority");
   child->num_choices = 2;
   child->value = circle_get_sound_output_priority() ==
@@ -6139,7 +6187,13 @@ void build_menu(struct menu_item *root) {
   strcpy(child->choices[1], "USB, HDMI");
   child->choice_ints[1] = SOUND_OUTPUT_PRIORITY_USB_HDMI;
 
-  emux_add_sound_options(parent);
+  struct menu_item *sound_emulation_parent =
+      ui_menu_add_folder(sound_parent, "Emulation");
+  struct menu_item *sound_sid_parent =
+      ui_menu_add_folder(sound_parent, "SID");
+
+  emux_add_sound_options(sound_emulation_parent, sound_sid_parent,
+                         sound_parent);
 
   parent = ui_menu_add_folder(root, "Keyboard");
 
@@ -6227,6 +6281,8 @@ void build_menu(struct menu_item *root) {
     usb_button_bits[j] = 1 << j;
   }
 
+  menu_usb_mapping_initialize();
+
   ui_menu_add_button(MENU_CONFIGURE_KEYSET1, parent, "Configure Keyset 1...");
   ui_menu_add_button(MENU_CONFIGURE_KEYSET2, parent, "Configure Keyset 2...");
 
@@ -6274,14 +6330,6 @@ void build_menu(struct menu_item *root) {
   ui_menu_add_divider(root);
 
   parent = ui_menu_add_folder(root, "Prefs");
-
-  if (emux_machine_class != BMC64_MACHINE_CLASS_PLUS4EMU) {
-    drive_sounds_item = ui_menu_add_toggle(MENU_DRIVE_SOUND_EMULATION, parent,
-                                         "Drive sound emulation", 0);
-    drive_sounds_vol_item =
-        ui_menu_add_range(MENU_DRIVE_SOUND_EMULATION_VOLUME, parent,
-                        "Drive sound emulation volume", 0, 1000, 100, 1000);
-  }
 
   statusbar_item =
       ui_menu_add_multiple_choice(MENU_OVERLAY, parent, "Show Status Bar");
@@ -6640,6 +6688,8 @@ const char* function_to_string(int button_func) {
        return "Tape OSD";
     case BTN_ASSIGN_CART_MENU:
        return "Cart OSD";
+    case BTN_ASSIGN_SID_FILTER_OSD:
+       return "SID Filter OSD";
     case BTN_ASSIGN_CART_FREEZE:
        return "Cart Freeze";
     case BTN_ASSIGN_RESET_MENU:

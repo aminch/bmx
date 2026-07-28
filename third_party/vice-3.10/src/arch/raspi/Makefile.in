@@ -16,7 +16,7 @@
 
 # Makefile.am for the raspi version of `libarch.a'.
 
-VPATH = @srcdir@
+VPATH = @srcdir@:@srcdir@/../shared
 am__is_gnu_make = { \
   if test -z '$(MAKELEVEL)'; then \
     false; \
@@ -109,8 +109,11 @@ am__v_AR_0 = @echo "  AR      " $@;
 am__v_AR_1 =
 libarch_a_AR = $(AR) $(ARFLAGS)
 libarch_a_LIBADD =
-am_libarch_a_OBJECTS = archdep.$(OBJEXT) mousedrv.$(OBJEXT) \
-	missing.$(OBJEXT) videoarch.$(OBJEXT) \
+am_libarch_a_OBJECTS = archdep.$(OBJEXT) archdep_chdir.$(OBJEXT) \
+	archdep_current_dir.$(OBJEXT) archdep_dir.$(OBJEXT) \
+	archdep_getcwd.$(OBJEXT) archdep_mkdir.$(OBJEXT) \
+	archdep_rmdir.$(OBJEXT) mousedrv.$(OBJEXT) missing.$(OBJEXT) \
+	videoarch.$(OBJEXT) \
 	vice_menu_cart_osd.$(OBJEXT) vice_overlay.$(OBJEXT) \
 	vice_api.$(OBJEXT)
 libarch_a_OBJECTS = $(am_libarch_a_OBJECTS)
@@ -471,6 +474,12 @@ noinst_LIBRARIES = libarch.a
 libarch_a_SOURCES = \
 	archdep.h \
 	archdep.c \
+	../shared/archdep_chdir.c \
+	../shared/archdep_current_dir.c \
+	../shared/archdep_dir.c \
+	../shared/archdep_getcwd.c \
+	../shared/archdep_mkdir.c \
+	../shared/archdep_rmdir.c \
 	mousedrv.h \
 	mousedrv.c \
 	missing.c \
@@ -529,6 +538,12 @@ distclean-compile:
 	-rm -f *.tab.c
 
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/archdep.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/archdep_chdir.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/archdep_current_dir.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/archdep_dir.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/archdep_getcwd.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/archdep_mkdir.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/archdep_rmdir.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/missing.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mousedrv.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vice_api.Po@am__quote@

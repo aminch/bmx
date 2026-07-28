@@ -34,6 +34,7 @@
 
 // RASPI includes
 #include "emux_api.h"
+#include "gamepad_defaults.h"
 #include "joy.h"
 #include "menu.h"
 #include "menu_key_binding.h"
@@ -64,9 +65,144 @@ struct menu_item *poty_low_item;
 
 struct menu_item *define_bindings_item;
 
+static USBMappingMode usb_mapping_modes[MAX_USB_DEVICES];
+static int usb_mapping_initialized;
+
+static int configured_device = -1;
+static struct menu_item *mapping_mode_item;
+static struct menu_item *direction_item;
+static struct menu_item *analog_x_item;
+static struct menu_item *analog_y_item;
+static struct menu_item *threshold_x_item;
+static struct menu_item *threshold_y_item;
+static struct menu_item *button_items[MAX_USB_BUTTONS];
+
 // Set to one when we are listening for raw usb values for config
 int want_raw_usb = 0;
 int want_raw_usb_device = 0;
+
+static void read_mapping(int device, USBGamepadMapping *mapping) {
+  int i;
+
+  mapping->preference = usb_pref[device];
+  mapping->x_axis = usb_x_axis[device];
+  mapping->y_axis = usb_y_axis[device];
+  mapping->x_threshold_percent = (int)(usb_x_thresh[device] * 100.0f + 0.5f);
+  mapping->y_threshold_percent = (int)(usb_y_thresh[device] * 100.0f + 0.5f);
+  for (i = 0; i < MAX_USB_BUTTONS; i++) {
+    mapping->buttons[i] = usb_button_assignments[device][i];
+  }
+}
+
+static void write_mapping(int device, const USBGamepadMapping *mapping) {
+  int i;
+
+  usb_pref[device] = mapping->preference;
+  usb_x_axis[device] = mapping->x_axis;
+  usb_y_axis[device] = mapping->y_axis;
+  usb_x_thresh[device] = ((float)mapping->x_threshold_percent) / 100.0f;
+  usb_y_thresh[device] = ((float)mapping->y_threshold_percent) / 100.0f;
+  for (i = 0; i < MAX_USB_BUTTONS; i++) {
+    usb_button_assignments[device][i] = mapping->buttons[i];
+  }
+}
+
+static void apply_automatic_mapping(int device) {
+  USBGamepadCapabilities capabilities;
+  USBGamepadMapping mapping;
+
+  capabilities.num_buttons = joy_num_buttons[device];
+  capabilities.num_axes = joy_num_axes[device];
+  capabilities.num_hats = joy_num_hats[device];
+  capabilities.known_mapping = joy_known_mapping[device];
+  capabilities.alternative_mapping = joy_alternative_mapping[device];
+  gamepad_mapping_set_automatic(&mapping, &capabilities);
+  write_mapping(device, &mapping);
+}
+
+static void refresh_open_mapping_menu(int device) {
+  int i;
+
+  if (configured_device != device || mapping_mode_item == NULL) {
+    return;
+  }
+
+  mapping_mode_item->value = usb_mapping_modes[device];
+  if (direction_item != NULL) {
+    direction_item->value = usb_pref[device];
+  }
+  if (analog_x_item != NULL) {
+    analog_x_item->value = usb_x_axis[device];
+  }
+  if (analog_y_item != NULL) {
+    analog_y_item->value = usb_y_axis[device];
+  }
+  if (threshold_x_item != NULL) {
+    threshold_x_item->value =
+        (int)(usb_x_thresh[device] * 100.0f + 0.5f);
+  }
+  if (threshold_y_item != NULL) {
+    threshold_y_item->value =
+        (int)(usb_y_thresh[device] * 100.0f + 0.5f);
+  }
+  for (i = 0; i < MAX_USB_BUTTONS; i++) {
+    if (button_items[i] != NULL) {
+      button_items[i]->value = usb_button_assignments[device][i];
+    }
+  }
+}
+
+static void mark_mapping_custom(int device) {
+  usb_mapping_modes[device] = USB_MAPPING_CUSTOM;
+  refresh_open_mapping_menu(device);
+}
+
+void menu_usb_mapping_initialize(void) {
+  int device;
+
+  for (device = 0; device < MAX_USB_DEVICES; device++) {
+    usb_mapping_modes[device] = USB_MAPPING_AUTOMATIC;
+  }
+  usb_mapping_initialized = 0;
+}
+
+void menu_usb_mapping_finish_load(
+    const int mode_was_loaded[MAX_USB_DEVICES],
+    const int loaded_mode[MAX_USB_DEVICES],
+    const int mapping_was_loaded[MAX_USB_DEVICES]) {
+  int device;
+
+  for (device = 0; device < MAX_USB_DEVICES; device++) {
+    USBGamepadMapping mapping;
+    read_mapping(device, &mapping);
+    usb_mapping_modes[device] = gamepad_mapping_resolve_mode(
+        mode_was_loaded[device], loaded_mode[device],
+        mapping_was_loaded[device], &mapping);
+    if (usb_mapping_modes[device] == USB_MAPPING_AUTOMATIC) {
+      apply_automatic_mapping(device);
+    }
+  }
+  usb_mapping_initialized = 1;
+}
+
+int menu_usb_mapping_mode(int device) {
+  return usb_mapping_modes[device];
+}
+
+void menu_usb_gamepad_info_changed(void) {
+  int device;
+
+  if (!usb_mapping_initialized) {
+    return;
+  }
+
+  for (device = 0; device < MAX_USB_DEVICES; device++) {
+    if (usb_mapping_modes[device] == USB_MAPPING_AUTOMATIC) {
+      apply_automatic_mapping(device);
+      refresh_open_mapping_menu(device);
+    }
+  }
+}
 
 // Conver this value to log2(b) for display purposes
 // Shows user which button index is being pressed on raw screen
@@ -81,6 +217,20 @@ static void raw_popped(struct menu_item *new_root,
   // This is our raw monitor being popped.
   // Turn off raw monitoring.
   want_raw_usb = 0;
+}
+
+static void mapping_menu_popped(struct menu_item *new_root,
+                                struct menu_item *old_root) {
+  (void)new_root;
+  (void)old_root;
+  configured_device = -1;
+  mapping_mode_item = NULL;
+  direction_item = NULL;
+  analog_x_item = NULL;
+  analog_y_item = NULL;
+  threshold_x_item = NULL;
+  threshold_y_item = NULL;
+  memset(button_items, 0, sizeof(button_items));
 }
 
 static void show_usb_monitor(int device) {
@@ -136,23 +286,40 @@ static void menu_usb_value_changed(struct menu_item *item) {
   struct menu_item* tmp_item;
 
   switch (item->id) {
+  case MENU_USB_0_MAPPING_MODE:
+  case MENU_USB_1_MAPPING_MODE:
+  case MENU_USB_2_MAPPING_MODE:
+  case MENU_USB_3_MAPPING_MODE: {
+    int device = item->id - MENU_USB_0_MAPPING_MODE;
+    usb_mapping_modes[device] = item->value == USB_MAPPING_AUTOMATIC
+                                    ? USB_MAPPING_AUTOMATIC
+                                    : USB_MAPPING_CUSTOM;
+    if (usb_mapping_modes[device] == USB_MAPPING_AUTOMATIC) {
+      apply_automatic_mapping(device);
+    }
+    refresh_open_mapping_menu(device);
+    break;
+  }
   case MENU_USB_0_PREF:
   case MENU_USB_1_PREF:
   case MENU_USB_2_PREF:
   case MENU_USB_3_PREF:
     usb_pref[item->id - MENU_USB_0_PREF] = item->value;
+    mark_mapping_custom(item->id - MENU_USB_0_PREF);
     break;
   case MENU_USB_0_X_AXIS:
   case MENU_USB_1_X_AXIS:
   case MENU_USB_2_X_AXIS:
   case MENU_USB_3_X_AXIS:
     usb_x_axis[item->id - MENU_USB_0_X_AXIS] = item->value;
+    mark_mapping_custom(item->id - MENU_USB_0_X_AXIS);
     break;
   case MENU_USB_0_Y_AXIS:
   case MENU_USB_1_Y_AXIS:
   case MENU_USB_2_Y_AXIS:
   case MENU_USB_3_Y_AXIS:
     usb_y_axis[item->id - MENU_USB_0_Y_AXIS] = item->value;
+    mark_mapping_custom(item->id - MENU_USB_0_Y_AXIS);
     break;
   case MENU_USB_0_WATCH_RAW:
   case MENU_USB_1_WATCH_RAW:
@@ -165,6 +332,7 @@ static void menu_usb_value_changed(struct menu_item *item) {
   case MENU_USB_2_BTN_ASSIGN:
   case MENU_USB_3_BTN_ASSIGN:
     usb_button_assignments[item->id - MENU_USB_0_BTN_ASSIGN][item->sub_id] = item->value;
+    mark_mapping_custom(item->id - MENU_USB_0_BTN_ASSIGN);
     break;
   case MENU_POTX_HIGH:
     pot_x_high_value = item->value;
@@ -183,12 +351,14 @@ static void menu_usb_value_changed(struct menu_item *item) {
   case MENU_USB_2_X_THRESH:
   case MENU_USB_3_X_THRESH:
     usb_x_thresh[item->id - MENU_USB_0_X_THRESH] = ((float)item->value) / 100.0f;
+    mark_mapping_custom(item->id - MENU_USB_0_X_THRESH);
     break;
   case MENU_USB_0_Y_THRESH:
   case MENU_USB_1_Y_THRESH:
   case MENU_USB_2_Y_THRESH:
   case MENU_USB_3_Y_THRESH:
     usb_y_thresh[item->id - MENU_USB_0_Y_THRESH] = ((float)item->value) / 100.0f;
+    mark_mapping_custom(item->id - MENU_USB_0_Y_THRESH);
     break;
   case MENU_CONFIGURE_KEY_BINDINGS:
     tmp_item = ui_push_menu(-1,-1);
@@ -241,6 +411,7 @@ static void add_button_choices(struct menu_item *tmp_item) {
   strcpy(tmp_item->choices[BTN_ASSIGN_ATTACH_DISK_9], function_to_string(BTN_ASSIGN_ATTACH_DISK_9));
   strcpy(tmp_item->choices[BTN_ASSIGN_ATTACH_DISK_10], function_to_string(BTN_ASSIGN_ATTACH_DISK_10));
   strcpy(tmp_item->choices[BTN_ASSIGN_ATTACH_DISK_11], function_to_string(BTN_ASSIGN_ATTACH_DISK_11));
+  strcpy(tmp_item->choices[BTN_ASSIGN_SID_FILTER_OSD], function_to_string(BTN_ASSIGN_SID_FILTER_OSD));
 
   char scratch[32];
   for (int n = 0; n < 6; n++) {
@@ -269,6 +440,7 @@ static void add_button_choices(struct menu_item *tmp_item) {
   if (emux_machine_class == BMC64_MACHINE_CLASS_PET) {
     tmp_item->choice_disabled[BTN_ASSIGN_VKBD_TOGGLE] = 1;
     tmp_item->choice_disabled[BTN_ASSIGN_ATTACH_CART] = 1;
+    tmp_item->choice_disabled[BTN_ASSIGN_SID_FILTER_OSD] = 1;
   }
 
   if (emux_machine_class == BMC64_MACHINE_CLASS_PLUS4EMU) {
@@ -276,20 +448,19 @@ static void add_button_choices(struct menu_item *tmp_item) {
     tmp_item->choice_disabled[BTN_ASSIGN_ATTACH_DISK_9] = 1;
     tmp_item->choice_disabled[BTN_ASSIGN_ATTACH_DISK_10] = 1;
     tmp_item->choice_disabled[BTN_ASSIGN_ATTACH_DISK_11] = 1;
+    tmp_item->choice_disabled[BTN_ASSIGN_SID_FILTER_OSD] = 1;
   }
 }
 
 void build_usb_menu(int dev, struct menu_item *root) {
-  struct menu_item *usb_pref_item;
-  struct menu_item *x_axis_item;
-  struct menu_item *y_axis_item;
-  struct menu_item *x_thresh_item;
-  struct menu_item *y_thresh_item;
   struct menu_item *tmp_item;
   char desc[40];
   char scratch[32];
   int i;
-  int j;
+
+  configured_device = dev;
+  memset(button_items, 0, sizeof(button_items));
+  root->on_popped_off = mapping_menu_popped;
 
   sprintf(desc, "USB %d:",dev+1);
   if (joy_num_pads > dev) {
@@ -302,25 +473,35 @@ void build_usb_menu(int dev, struct menu_item *root) {
 
   ui_menu_add_button(MENU_TEXT, root, desc);
   ui_menu_add_divider(root);
-  usb_pref_item =
-      ui_menu_add_multiple_choice(MENU_USB_0_PREF+dev, root, "");
-  sprintf (usb_pref_item->name, "USB %d Directions", dev+1);
-  usb_pref_item->value = usb_pref[dev];
 
-  x_axis_item = ui_menu_add_range(MENU_USB_0_X_AXIS+dev, root, "",
-                                  0, 12, 1, usb_x_axis[dev]);
-  sprintf (x_axis_item->name, "USB %d Analog X #", dev+1);
-  y_axis_item = ui_menu_add_range(MENU_USB_0_Y_AXIS+dev, root, "",
-                                  0, 12, 1, usb_y_axis[dev]);
-  sprintf (y_axis_item->name, "USB %d Analog Y #", dev+1);
-  x_thresh_item = ui_menu_add_range(MENU_USB_0_X_THRESH+dev, root,
-                                    "", 10, 90, 1,
-                                    (int)(usb_x_thresh[dev] * 100.0f));
-  sprintf (x_thresh_item->name, "USB %d Analog X Threshold % #", dev+1);
-  y_thresh_item = ui_menu_add_range(MENU_USB_0_Y_THRESH+dev, root,
-                                    "", 10, 90, 1,
-                                    (int)(usb_y_thresh[dev] * 100.0f));
-  sprintf (y_thresh_item->name, "USB %d Analog Y Threshold % #", dev+1);
+  mapping_mode_item =
+      ui_menu_add_multiple_choice(MENU_USB_0_MAPPING_MODE+dev, root,
+                                  "Mapping Mode");
+  mapping_mode_item->num_choices = 2;
+  strcpy(mapping_mode_item->choices[USB_MAPPING_AUTOMATIC], "Automatic");
+  strcpy(mapping_mode_item->choices[USB_MAPPING_CUSTOM], "Custom");
+  mapping_mode_item->value = usb_mapping_modes[dev];
+  mapping_mode_item->on_value_changed = menu_usb_value_changed;
+
+  direction_item =
+      ui_menu_add_multiple_choice(MENU_USB_0_PREF+dev, root, "");
+  sprintf (direction_item->name, "USB %d Directions", dev+1);
+  direction_item->value = usb_pref[dev];
+
+  analog_x_item = ui_menu_add_range(MENU_USB_0_X_AXIS+dev, root, "",
+                                    0, 12, 1, usb_x_axis[dev]);
+  sprintf (analog_x_item->name, "USB %d Analog X #", dev+1);
+  analog_y_item = ui_menu_add_range(MENU_USB_0_Y_AXIS+dev, root, "",
+                                    0, 12, 1, usb_y_axis[dev]);
+  sprintf (analog_y_item->name, "USB %d Analog Y #", dev+1);
+  threshold_x_item = ui_menu_add_range(MENU_USB_0_X_THRESH+dev, root,
+                                       "", 10, 90, 1,
+                                       (int)(usb_x_thresh[dev] * 100.0f));
+  sprintf (threshold_x_item->name, "USB %d Analog X Threshold % #", dev+1);
+  threshold_y_item = ui_menu_add_range(MENU_USB_0_Y_THRESH+dev, root,
+                                       "", 10, 90, 1,
+                                       (int)(usb_y_thresh[dev] * 100.0f));
+  sprintf (threshold_y_item->name, "USB %d Analog Y Threshold % #", dev+1);
 
   tmp_item = ui_menu_add_button(MENU_USB_0_WATCH_RAW+dev, root,
                                 "");
@@ -335,6 +516,7 @@ void build_usb_menu(int dev, struct menu_item *root) {
     tmp_item->value = usb_button_assignments[dev][i];
     tmp_item->on_value_changed = menu_usb_value_changed;
     tmp_item->sub_id = i;
+    button_items[i] = tmp_item;
   }
 
   ui_menu_add_divider(root);
@@ -351,17 +533,17 @@ void build_usb_menu(int dev, struct menu_item *root) {
   poty_low_item = ui_menu_add_range(MENU_POTY_LOW, root, "POT Y Down Value", 0,
                                     255, 1, pot_y_low_value);
 
-  usb_pref_item->num_choices = 3;
-  strcpy(usb_pref_item->choices[0], "Analog+POTX/Y Buttons");
-  strcpy(usb_pref_item->choices[1], "Hat+POTX/Y Buttons");
-  strcpy(usb_pref_item->choices[2], "Hat+POTX/Y Paddles");
+  direction_item->num_choices = 3;
+  strcpy(direction_item->choices[0], "Analog+POTX/Y Buttons");
+  strcpy(direction_item->choices[1], "Hat+POTX/Y Buttons");
+  strcpy(direction_item->choices[2], "Hat+POTX/Y Paddles");
 
   define_bindings_item->on_value_changed = menu_usb_value_changed;
-  usb_pref_item->on_value_changed = menu_usb_value_changed;
-  x_axis_item->on_value_changed = menu_usb_value_changed;
-  y_axis_item->on_value_changed = menu_usb_value_changed;
-  x_thresh_item->on_value_changed = menu_usb_value_changed;
-  y_thresh_item->on_value_changed = menu_usb_value_changed;
+  direction_item->on_value_changed = menu_usb_value_changed;
+  analog_x_item->on_value_changed = menu_usb_value_changed;
+  analog_y_item->on_value_changed = menu_usb_value_changed;
+  threshold_x_item->on_value_changed = menu_usb_value_changed;
+  threshold_y_item->on_value_changed = menu_usb_value_changed;
 
   potx_high_item->on_value_changed = menu_usb_value_changed;
   potx_low_item->on_value_changed = menu_usb_value_changed;

@@ -72,6 +72,29 @@ static int set_legacy_warp_mode(int val, void *param)
   return 0;
 }
 
+static int set_legacy_iec_device(int val, void *param)
+{
+  const unsigned int unit = vice_ptr_to_uint(param);
+  char resource_name[16];
+
+  if (unit < 8 || unit > 11) {
+    return -1;
+  }
+
+  legacy_iec_device[unit - 8] = val ? 1 : 0;
+  snprintf(resource_name, sizeof(resource_name), "BusDevice%u", unit);
+
+  /*
+   * The compatibility resources are registered before the serial bus
+   * resources.  Their factory values therefore cannot be forwarded yet,
+   * while values loaded later from an old config file can and should be.
+   */
+  if (resources_exists(resource_name)) {
+    return resources_set_int(resource_name, legacy_iec_device[unit - 8]);
+  }
+  return 0;
+}
+
 static const resource_int_t bmc64_compat_resources_int[] = {
     { "WarpMode", 0, RES_EVENT_STRICT, (resource_value_t)0,
       &legacy_warp_mode, set_legacy_warp_mode, NULL },
@@ -82,13 +105,13 @@ static const resource_int_t bmc64_compat_resources_int[] = {
     { "VirtualDevices", 0, RES_EVENT_NO, NULL,
       &legacy_virtual_devices, set_legacy_int, &legacy_virtual_devices },
     { "IECDevice8", 0, RES_EVENT_NO, NULL,
-      &legacy_iec_device[0], set_legacy_int, &legacy_iec_device[0] },
+      &legacy_iec_device[0], set_legacy_iec_device, (void *)8 },
     { "IECDevice9", 0, RES_EVENT_NO, NULL,
-      &legacy_iec_device[1], set_legacy_int, &legacy_iec_device[1] },
+      &legacy_iec_device[1], set_legacy_iec_device, (void *)9 },
     { "IECDevice10", 0, RES_EVENT_NO, NULL,
-      &legacy_iec_device[2], set_legacy_int, &legacy_iec_device[2] },
+      &legacy_iec_device[2], set_legacy_iec_device, (void *)10 },
     { "IECDevice11", 0, RES_EVENT_NO, NULL,
-      &legacy_iec_device[3], set_legacy_int, &legacy_iec_device[3] },
+      &legacy_iec_device[3], set_legacy_iec_device, (void *)11 },
     { "VICIIHwScale", 0, RES_EVENT_NO, NULL,
       &legacy_vicii_hw_scale, set_legacy_int, &legacy_vicii_hw_scale },
     { "VICHwScale", 0, RES_EVENT_NO, NULL,

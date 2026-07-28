@@ -42,6 +42,7 @@ extern "C" {
 #include "log.h"
 #include "resid.h"
 #include "resources.h"
+#include "sid-resources.h"
 #include "sid-snapshot.h"
 #include "types.h"
 
@@ -63,6 +64,8 @@ struct sound_s
 
     /* resid sid implementation */
     reSID::SID *sid;
+
+    int chip_num;
 };
 
 typedef struct sound_s sound_t;
@@ -85,13 +88,14 @@ static short *getbuf(int len)
     return buf;
 }
 
-static sound_t *resid_open(uint8_t *sidstate)
+static sound_t *resid_open(uint8_t *sidstate, int chip_num)
 {
     sound_t *psid;
     int i;
 
     psid = new sound_t;
     psid->sid = new reSID::SID;
+    psid->chip_num = chip_num;
 
     for (i = 0x00; i <= 0x18; i++) {
         psid->sid->write(i, sidstate[i]);
@@ -109,13 +113,8 @@ static int resid_init(sound_t *psid, int speed, int cycles_per_sec, int factor)
     int filters_enabled, model, sampling, passband_percentage, gain_percentage, filter_bias_mV;
     int rawoutput;
 
-    if (resources_get_int("SidFilters", &filters_enabled) < 0) {
-        return 0;
-    }
-
-    if (resources_get_int("SidModel", &model) < 0) {
-        return 0;
-    }
+    filters_enabled = sid_get_filters_for_chip(psid->chip_num);
+    model = sid_get_model_for_chip(psid->chip_num);
 
     if (resources_get_int("SidResidEnableRawOutput", &rawoutput) < 0) {
         return 0;
@@ -129,33 +128,9 @@ static int resid_init(sound_t *psid, int speed, int cycles_per_sec, int factor)
         return 0;
     }
 
-    if ((model == 1) || (model == 2)) {
-        /* 8580 */
-        if (resources_get_int("SidResid8580Passband", &passband_percentage) < 0) {
-            return 0;
-        }
-
-        if (resources_get_int("SidResid8580Gain", &gain_percentage) < 0) {
-            return 0;
-        }
-
-        if (resources_get_int("SidResid8580FilterBias", &filter_bias_mV) < 0) {
-            return 0;
-        }
-    } else {
-        /* 6581 */
-        if (resources_get_int("SidResidPassband", &passband_percentage) < 0) {
-            return 0;
-        }
-
-        if (resources_get_int("SidResidGain", &gain_percentage) < 0) {
-            return 0;
-        }
-
-        if (resources_get_int("SidResidFilterBias", &filter_bias_mV) < 0) {
-            return 0;
-        }
-    }
+    sid_get_resid_filter_for_chip(psid->chip_num, model,
+                                  &passband_percentage, &gain_percentage,
+                                  &filter_bias_mV);
 
     passband = speed * passband_percentage / 200.0;
     gain = gain_percentage / 100.0;

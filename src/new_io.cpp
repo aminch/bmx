@@ -21,6 +21,12 @@ extern int errno;
 
 #include <ff.h>
 
+#ifdef BMX_NEW_IO_HOST_TEST
+#define BMX_NEW_IO_POSIX(name) bmx_##name
+#else
+#define BMX_NEW_IO_POSIX(name) name
+#endif
+
 // This is a replacement io.cpp specifically for BMX. Small files can be
 // cached in memory to keep seek-heavy VICE media fast on slow SD cards. The
 // cache is capped at Circle's largest reusable heap bucket so closing a file
@@ -1027,7 +1033,7 @@ extern "C" int _write(int fildes, char *ptr, int len) {
   return len;
 }
 
-extern "C" DIR *opendir(const char *name) {
+extern "C" DIR *BMX_NEW_IO_POSIX(opendir)(const char *name) {
   CirclePath circlePath(name); 
   if (!circlePath.ok) {
     errno = circlePath.error;
@@ -1041,8 +1047,9 @@ extern "C" DIR *opendir(const char *name) {
   }
 
   CircleDir &slot = dirTab[slotNum];
-  if (f_opendir(&slot.dir, circlePath.path) != FR_OK) {
-    errno = ENFILE;
+  const FRESULT result = f_opendir(&slot.dir, circlePath.path);
+  if (result != FR_OK) {
+    set_fatfs_errno(result);
     return 0;
   }
 
@@ -1067,7 +1074,7 @@ static struct dirent *do_readdir(CircleDir *dir, struct dirent *de) {
   return result;
 }
 
-extern "C" struct dirent *readdir(DIR *dir) {
+extern "C" struct dirent *BMX_NEW_IO_POSIX(readdir)(DIR *dir) {
   CircleDir *c_dir = FindCircleDirFromDIR(dir);
   if (c_dir == nullptr) {
     errno = EBADF;
@@ -1077,8 +1084,9 @@ extern "C" struct dirent *readdir(DIR *dir) {
   return do_readdir(c_dir, &c_dir->mEntry);
 }
 
-extern "C" int readdir_r(DIR *__restrict dir, dirent *__restrict de,
-                         dirent **__restrict ode) {
+extern "C" int BMX_NEW_IO_POSIX(readdir_r)(DIR *__restrict dir,
+                                              dirent *__restrict de,
+                                              dirent **__restrict ode) {
   int result;
   CircleDir *c_dir = FindCircleDirFromDIR(dir);
 
@@ -1093,14 +1101,14 @@ extern "C" int readdir_r(DIR *__restrict dir, dirent *__restrict de,
   return result;
 }
 
-extern "C" void rewinddir(DIR *dir) {
+extern "C" void BMX_NEW_IO_POSIX(rewinddir)(DIR *dir) {
   CircleDir *c_dir = FindCircleDirFromDIR(dir);
   if (c_dir != nullptr) {
     f_rewinddir(&c_dir->dir);
   }
 }
 
-extern "C" int closedir(DIR *dir) {
+extern "C" int BMX_NEW_IO_POSIX(closedir)(DIR *dir) {
   CircleDir *c_dir = FindCircleDirFromDIR(dir);
   if (c_dir == nullptr) {
     errno = EBADF;
@@ -1284,50 +1292,116 @@ extern "C" int _lseek(int fildes, int ptr, int dir) {
   return file.position;
 }
 
-int chdir (const char *path)
-{
+extern "C" int BMX_NEW_IO_POSIX(chdir)(const char *path) {
   if (path == nullptr) {
-     errno = EIO;
-     return -1;
+    errno = EFAULT;
+    return -1;
   }
 
   size_t len = strlen(path);
   if (len == 0) {
-     return 0;
+    return 0;
   }
 
   if (len == 1 && path[0] == '.') {
-     return 0;
+    return 0;
   }
 
   // Up to parent
   if (len == 2 && path[0] == '.' && path[1] == '.') {
-     move_current_dir_to_parent();
-     return 0;
+    move_current_dir_to_parent();
+    return 0;
   }
 
   CirclePath circlePath(path);
   if (!circlePath.ok) {
-     errno = circlePath.error;
-     return -1;
+    errno = circlePath.error;
+    return -1;
   }
+
+  if (!is_root_path(circlePath.path)) {
+    FILINFO info;
+    const FRESULT result = f_stat(circlePath.path, &info);
+    if (result != FR_OK) {
+      set_fatfs_errno(result);
+      return -1;
+    }
+    if (!(info.fattrib & AM_DIR)) {
+      errno = ENOTDIR;
+      return -1;
+    }
+  }
+
   if (!copy_string(currentDir, sizeof currentDir, circlePath.path)) {
-     errno = ENAMETOOLONG;
-     return -1;
+    errno = ENAMETOOLONG;
+    return -1;
   }
 
   return 0;
 }
 
-char *getwd(char *buf) {
-   if (buf) {
-      if (!copy_string(buf, BMC64_PATH_MAX, currentDir)) {
-         errno = ENAMETOOLONG;
-         return nullptr;
-      }
-      strip_trailing_slash(buf);
-   }
-   return buf;
+extern "C" char *BMX_NEW_IO_POSIX(getcwd)(char *buf, size_t size) {
+  if (buf == nullptr) {
+    errno = EFAULT;
+    return nullptr;
+  }
+
+  const size_t required = strlen(currentDir) + 1;
+  if (size < required) {
+    errno = ERANGE;
+    return nullptr;
+  }
+
+  memcpy(buf, currentDir, required);
+  strip_trailing_slash(buf);
+  return buf;
+}
+
+extern "C" char *BMX_NEW_IO_POSIX(getwd)(char *buf) {
+  return BMX_NEW_IO_POSIX(getcwd)(buf, BMC64_PATH_MAX);
+}
+
+extern "C" int BMX_NEW_IO_POSIX(mkdir)(const char *path, mode_t mode) {
+  (void)mode;
+
+  CirclePath circlePath(path);
+  if (!circlePath.ok) {
+    errno = circlePath.error;
+    return -1;
+  }
+
+  const FRESULT result = f_mkdir(circlePath.path);
+  if (result != FR_OK) {
+    set_fatfs_errno(result);
+    return -1;
+  }
+  return 0;
+}
+
+extern "C" int BMX_NEW_IO_POSIX(rmdir)(const char *path) {
+  CirclePath circlePath(path);
+  if (!circlePath.ok) {
+    errno = circlePath.error;
+    return -1;
+  }
+
+  FILINFO info;
+  FRESULT result = f_stat(circlePath.path, &info);
+  if (result != FR_OK) {
+    set_fatfs_errno(result);
+    return -1;
+  }
+  if (!(info.fattrib & AM_DIR)) {
+    errno = ENOTDIR;
+    return -1;
+  }
+
+  result = f_unlink(circlePath.path);
+  if (result != FR_OK) {
+    set_fatfs_errno(result);
+    return -1;
+  }
+  return 0;
 }
 
 extern "C" int _link(char *existing, char *newname) {

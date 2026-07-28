@@ -365,6 +365,7 @@ static void handle_key_combo_function() {
       case BTN_ASSIGN_RESET_SOFT:
       case BTN_ASSIGN_TAPE_MENU:
       case BTN_ASSIGN_CART_MENU:
+      case BTN_ASSIGN_SID_FILTER_OSD:
       case BTN_ASSIGN_ATTACH_TAPE:
       case BTN_ASSIGN_ATTACH_CART:
       case BTN_ASSIGN_ATTACH_DISK_8:

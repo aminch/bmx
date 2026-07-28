@@ -207,7 +207,7 @@ void sid_state_read(unsigned int channel, struct sid_snapshot_state_s *sid_state
 void sid_state_write(unsigned int channel, struct sid_snapshot_state_s *sid_state);
 
 struct sid_engine_s {
-    struct sound_s *(*open)(uint8_t *sidstate);
+    struct sound_s *(*open)(uint8_t *sidstate, int chipno);
     int (*init)(struct sound_s *psid, int speed, int cycles_per_sec, int factor);
     void (*close)(struct sound_s *psid);
     uint8_t (*read)(struct sound_s *psid, uint16_t addr);

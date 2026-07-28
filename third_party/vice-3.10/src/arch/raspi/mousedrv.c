@@ -28,11 +28,9 @@
 
 #include <stdio.h>
 
-// RASPI includes
-#include "videoarch.h"
-
-static int mouse_x, mouse_y;
-static unsigned long mouse_timestamp = 0;
+/* Circle delivers USB mouse movement on core 0; VICE consumes it on core 1. */
+static int mouse_pending_x;
+static int mouse_pending_y;
 static mouse_func_t mouse_funcs;
 
 int mousedrv_resources_init(mouse_func_t *funcs) {
@@ -51,16 +49,18 @@ void mousedrv_init(void) {}
 
 void mousedrv_mouse_changed(void) {}
 
-int mousedrv_get_x(void) { return mouse_x; }
+void mousedrv_poll(void) {
+  int delta_x = __atomic_exchange_n(&mouse_pending_x, 0, __ATOMIC_ACQ_REL);
+  int delta_y = __atomic_exchange_n(&mouse_pending_y, 0, __ATOMIC_ACQ_REL);
 
-int mousedrv_get_y(void) { return mouse_y; }
-
-unsigned long mousedrv_get_timestamp(void) { return mouse_timestamp; }
+  if (delta_x != 0 || delta_y != 0) {
+    mouse_move((float)delta_x, (float)delta_y);
+  }
+}
 
 void emu_mouse_move(int x, int y) {
-  mouse_x += x;
-  mouse_y -= y;
-  mouse_timestamp = vsyncarch_gettime();
+  __atomic_fetch_add(&mouse_pending_x, x, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&mouse_pending_y, y, __ATOMIC_RELAXED);
 }
 
 void emu_mouse_button_left(int pressed) {

@@ -128,6 +128,7 @@
 #define BTN_ASSIGN_ATTACH_DISK_9 34
 #define BTN_ASSIGN_ATTACH_DISK_10 35
 #define BTN_ASSIGN_ATTACH_DISK_11 36
+#define BTN_ASSIGN_SID_FILTER_OSD 37
 
 // These are intermediate values not meant to
 // be directly assigned to buttons. Never used as
@@ -306,6 +307,10 @@ extern void circle_set_shader_params(int curvature,
 // Must be called before launching emulator's main_program func.
 extern void emu_machine_init(int raster_skip_enabled, int raster_skip2_enabled);
 
+// Update VICE's output rate and reopen the sound engine at a safe flush
+// boundary.
+extern int emu_set_sound_sample_rate(int sample_rate);
+
 // Compares the previous button state for 'button_num' with
 // the current state and will return a press or release event
 // for that button if the button has a button assignment.
@@ -372,9 +377,11 @@ extern void emu_get_usb_pref(int device, int *usb_pref,
 
 // Tell emulator about known gamepad configuration. Used after usb init.
 extern void emu_set_gamepad_info(int num_pads,
-                                 int num_buttons[2],
-                                 int axes[2],
-                                 int hats[2]);
+                                 int num_buttons[MAX_USB_DEVICES],
+                                 int axes[MAX_USB_DEVICES],
+                                 int hats[MAX_USB_DEVICES],
+                                 int known_mapping[MAX_USB_DEVICES],
+                                 int alternative_mapping[MAX_USB_DEVICES]);
 
 // Test whether emulator is in a config mode where it wants to receive
 // raw usb data.

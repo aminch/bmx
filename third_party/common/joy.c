@@ -34,6 +34,7 @@
 #include "kbd.h"
 #include "menu.h"
 #include "menu_keyset.h"
+#include "menu_usb.h"
 #include "ui.h"
 #include "overlay.h"
 
@@ -42,6 +43,8 @@ int joy_num_pads;
 int joy_num_buttons[MAX_USB_DEVICES];
 int joy_num_axes[MAX_USB_DEVICES];
 int joy_num_hats[MAX_USB_DEVICES];
+int joy_known_mapping[MAX_USB_DEVICES];
+int joy_alternative_mapping[MAX_USB_DEVICES];
 
 // Holds previous button states for the purpose of
 // reporting button functions press/release events.
@@ -435,13 +438,18 @@ int joy_arch_init(void) { return 0; }
 void emu_set_gamepad_info(int num_pads,
                           int num_buttons[MAX_USB_DEVICES],
                           int num_axes[MAX_USB_DEVICES],
-                          int num_hats[MAX_USB_DEVICES]) {
+                          int num_hats[MAX_USB_DEVICES],
+                          int known_mapping[MAX_USB_DEVICES],
+                          int alternative_mapping[MAX_USB_DEVICES]) {
   joy_num_pads = MIN(num_pads , MAX_USB_DEVICES);
   for (int k = 0 ; k < MAX_USB_DEVICES; k++) {
     joy_num_axes[k] = MIN(num_axes[k] , MAX_USB_AXES);
     joy_num_hats[k] = MIN(num_hats[k] , MAX_USB_HATS);
     joy_num_buttons[k] = MIN(num_buttons[k] , MAX_USB_BUTTONS);
+    joy_known_mapping[k] = known_mapping[k] != 0;
+    joy_alternative_mapping[k] = alternative_mapping[k] != 0;
   }
+  menu_usb_gamepad_info_changed();
 }
 
 void __attribute__((weak)) joystick_close(void) {}

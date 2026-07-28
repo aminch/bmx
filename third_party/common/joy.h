@@ -29,7 +29,7 @@
 
 #include "circle.h"
 
-#define MAX_USB_BUTTONS 20
+#define MAX_USB_BUTTONS 22
 #define MAX_USB_AXES 16
 #define MAX_USB_HATS 6
 
@@ -48,6 +48,8 @@ extern int joy_num_pads;
 extern int joy_num_axes[MAX_USB_DEVICES];
 extern int joy_num_hats[MAX_USB_DEVICES];
 extern int joy_num_buttons[MAX_USB_DEVICES];
+extern int joy_known_mapping[MAX_USB_DEVICES];
+extern int joy_alternative_mapping[MAX_USB_DEVICES];
 extern unsigned joy_prev_buttons[MAX_USB_DEVICES];
 
 int joy_key_up(unsigned int device, int key);

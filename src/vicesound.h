@@ -36,26 +36,40 @@
 class ViceSound {
 public:
   ViceSound(CInterruptSystem *pInterrupt,
-            TVCHIQSoundDestination Destination = VCHIQSoundDestinationAuto);
+            TVCHIQSoundDestination Destination = VCHIQSoundDestinationAuto,
+            unsigned SampleRate = SAMPLE_RATE);
 
   ~ViceSound(void);
 
   static SoundOutputPriority DefaultOutputPriority(void);
+  static unsigned SelectSampleRate(void);
+  static boolean USBOutputAvailable(void);
 
   boolean Playback(int volume, int channels, SoundOutputPriority priority);
   boolean PlaybackActive(void) const;
+  void USBPlugAndPlayChanged(boolean usbOutputAvailable,
+                             SoundOutputPriority priority);
   void CancelPlayback(void);
+  void SetSampleRate(unsigned SampleRate);
   void SetControl(int nVolume,
                   TVCHIQSoundDestination Destination = VCHIQSoundDestinationUnknown);
   unsigned AddChunk(s16 *pBuffer, unsigned nChunkSize);
   unsigned BufferSpaceSamples();
 
 private:
+  enum OutputDevice {
+    OutputNone,
+    OutputHDMI,
+    OutputUSB
+  };
+
   CSoundBaseDevice *mSoundDevice;
   boolean StartHDMI(void);
   boolean StartUSB(void);
+  OutputDevice mOutputDevice;
   CInterruptSystem *mInterrupt;
   TVCHIQSoundDestination mDestination;
+  unsigned mSampleRate;
   unsigned mQueueSizeFrames;
   unsigned mNumChannels;
   int mVolumePercent;

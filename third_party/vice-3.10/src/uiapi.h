@@ -71,6 +71,11 @@ void ui_error(const char *format, ...) VICE_ATTR_PRINTF;
 /* Display a mesage without interrupting emulation */
 void ui_display_statustext(const char *text, bool fadeout);
 
+#ifdef RASPI_COMPILE
+/* Update the BMX status-bar warp indicator. */
+void ui_display_warp_status(int warp);
+#endif
+
 /* Let the user browse for a filename; display format as a titel */
 char* ui_get_file(const char *format, ...) VICE_ATTR_PRINTF;
 

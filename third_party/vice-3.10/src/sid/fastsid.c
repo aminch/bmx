@@ -41,6 +41,7 @@
 #include "machine.h"
 #include "maincpu.h"
 #include "resources.h"
+#include "sid-resources.h"
 #include "sid-snapshot.h"
 #include "sid.h"
 #include "sound.h"
@@ -229,6 +230,8 @@ struct sound_s {
     uint8_t filterType;
     uint8_t filterCurType;
     uint16_t filterValue;
+
+    int chip_num;
 };
 
 /* XXX: check these */
@@ -975,13 +978,14 @@ static void init_filter(sound_t *psid, int freq)
 }
 
 /* SID initialization routine */
-static sound_t *fastsid_open(uint8_t *sidstate)
+static sound_t *fastsid_open(uint8_t *sidstate, int chip_num)
 {
     sound_t *psid;
 
     psid = lib_calloc(1, sizeof(sound_t));
 
     memcpy(psid->d, sidstate, 32);
+    psid->chip_num = chip_num;
 
     return psid;
 }
@@ -1000,9 +1004,7 @@ static int fastsid_init(sound_t *psid, int speed, int cycles_per_sec, int factor
     }
     psid->update = 1;
 
-    if (resources_get_int("SidFilters", &(psid->emulatefilter)) < 0) {
-        return 0;
-    }
+    psid->emulatefilter = sid_get_filters_for_chip(psid->chip_num);
 
     init_filter(psid, speed);
     setup_sid(psid);
@@ -1020,9 +1022,7 @@ static int fastsid_init(sound_t *psid, int speed, int cycles_per_sec, int factor
         setup_voice(&psid->v[i]);
     }
 #ifdef WAVETABLES
-    if (resources_get_int("SidModel", &sid_model) < 0) {
-        return 0;
-    }
+    sid_model = sid_get_model_for_chip(psid->chip_num);
 
     psid->newsid = 0;
     switch (sid_model) {

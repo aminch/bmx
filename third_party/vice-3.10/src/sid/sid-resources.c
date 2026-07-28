@@ -56,6 +56,10 @@
 
 static int sid_filters_enabled;       /* app_resources.sidFilters */
 static int sid_model;                 /* app_resources.sidModel */
+#ifdef RASPI_COMPILE
+static int sid_model2;                /* BMX model for the second SID */
+static int sid_filters2;              /* BMX filter override for SID2 */
+#endif
 #if defined(HAVE_RESID)
 static int sid_resid_sampling;
 static int sid_resid_passband;
@@ -65,6 +69,15 @@ static int sid_resid_8580_passband;
 static int sid_resid_8580_gain;
 static int sid_resid_8580_filter_bias;
 static int sid_resid_enable_raw_output;
+#ifdef RASPI_COMPILE
+static int sid2_resid_passband;
+static int sid2_resid_gain;
+static int sid2_resid_filter_bias;
+static int sid2_resid_8580_passband;
+static int sid2_resid_8580_gain;
+static int sid2_resid_8580_filter_bias;
+static int sid2_resid_settings_initialized;
+#endif
 #endif
 int sid_stereo = 0;
 int checking_sid_stereo;
@@ -155,6 +168,31 @@ static int set_sid_filters_enabled(int val, void *param)
     return 0;
 }
 
+#ifdef RASPI_COMPILE
+static int set_sid_filters2(int val, void *param)
+{
+    if (val != SID2_FILTERS_SAME_AS_SID1 &&
+        val != SID2_FILTERS_OFF && val != SID2_FILTERS_ON) {
+        return -1;
+    }
+
+    sid_filters2 = val;
+    sid_state_changed = 1;
+
+    return 0;
+}
+#endif
+
+int sid_get_filters_for_chip(int chipno)
+{
+#ifdef RASPI_COMPILE
+    if (chipno == 1 && sid_filters2 != SID2_FILTERS_SAME_AS_SID1) {
+        return sid_filters2;
+    }
+#endif
+    return sid_filters_enabled;
+}
+
 #if defined(HAVE_RESID) || defined(HAVE_RESID_DTV)
 static int set_sid_resid_enable_raw_output(int val, void *param)
 {
@@ -212,26 +250,30 @@ SET_SIDx_ADDRESS(6)
 SET_SIDx_ADDRESS(7)
 SET_SIDx_ADDRESS(8)
 
-static int set_sid_model(int val, void *param)
+static int sid_default_model(void)
 {
-    sid_model = val;
+    int model = SID_MODEL_6581;
 
-    if (sid_model == SID_MODEL_DEFAULT) {
-        sid_model = SID_MODEL_6581;
 #ifdef HAVE_RESID
-        if (machine_class == VICE_MACHINE_C64DTV) {
-            sid_model = SID_MODEL_DTVSID;
-        } else
+    if (machine_class == VICE_MACHINE_C64DTV) {
+        model = SID_MODEL_DTVSID;
+    } else
 #endif
-        if ((machine_class == VICE_MACHINE_C128) ||
-            (machine_class == VICE_MACHINE_C64) ||
-            (machine_class == VICE_MACHINE_C64SC) ||
-            (machine_class == VICE_MACHINE_SCPU64)){
-            sid_model = SID_MODEL_8580;
-        }
+    if ((machine_class == VICE_MACHINE_C128) ||
+        (machine_class == VICE_MACHINE_C64) ||
+        (machine_class == VICE_MACHINE_C64SC) ||
+        (machine_class == VICE_MACHINE_SCPU64)) {
+        model = SID_MODEL_8580;
     }
 
-    switch (sid_model) {
+    return model;
+}
+
+static int set_sid_model_value(int val, int *destination)
+{
+    int model = val == SID_MODEL_DEFAULT ? sid_default_model() : val;
+
+    switch (model) {
         case SID_MODEL_6581:
         case SID_MODEL_8580:
         case SID_MODEL_8580D:
@@ -243,11 +285,45 @@ static int set_sid_model(int val, void *param)
             return -1;
     }
 
+    *destination = model;
+    sid_state_changed = 1;
+    return 0;
+}
+
+static int set_sid_model(int val, void *param)
+{
+    if (set_sid_model_value(val, &sid_model) < 0) {
+        return -1;
+    }
+
 #ifdef SID_ENGINE_MODEL_DEBUG
     log_debug(LOG_DEFAULT, "SID model set to %d", sid_model);
 #endif
-    sid_state_changed = 1;
     return 0;
+}
+
+#ifdef RASPI_COMPILE
+static int set_sid_model2(int val, void *param)
+{
+    if (set_sid_model_value(val, &sid_model2) < 0) {
+        return -1;
+    }
+
+#ifdef SID_ENGINE_MODEL_DEBUG
+    log_debug(LOG_DEFAULT, "SID2 model set to %d", sid_model2);
+#endif
+    return 0;
+}
+#endif
+
+int sid_get_model_for_chip(int chipno)
+{
+#ifdef RASPI_COMPILE
+    if (chipno == 1) {
+        return sid_model2;
+    }
+#endif
+    return sid_model;
 }
 
 #if defined(HAVE_RESID) || defined(HAVE_RESID_DTV)
@@ -346,7 +422,152 @@ static int set_sid_resid_8580_filter_bias(int i, void *param)
     return 0;
 }
 
+#ifdef RASPI_COMPILE
+static int set_sid2_resid_passband(int i, void *param)
+{
+    if (i < RESID_6581_PASSBAND_MIN) {
+        i = RESID_6581_PASSBAND_MIN;
+    } else if (i > RESID_6581_PASSBAND_MAX) {
+        i = RESID_6581_PASSBAND_MAX;
+    }
+
+    sid2_resid_passband = i;
+    sid_state_changed = 1;
+    return 0;
+}
+
+static int set_sid2_resid_gain(int i, void *param)
+{
+    if (i < RESID_6581_FILTER_GAIN_MIN) {
+        i = RESID_6581_FILTER_GAIN_MIN;
+    } else if (i > RESID_6581_FILTER_GAIN_MAX) {
+        i = RESID_6581_FILTER_GAIN_MAX;
+    }
+
+    sid2_resid_gain = i;
+    sid_state_changed = 1;
+    return 0;
+}
+
+static int set_sid2_resid_filter_bias(int i, void *param)
+{
+    if (i < RESID_6581_FILTER_BIAS_MIN) {
+        i = RESID_6581_FILTER_BIAS_MIN;
+    } else if (i > RESID_6581_FILTER_BIAS_MAX) {
+        i = RESID_6581_FILTER_BIAS_MAX;
+    }
+
+    sid2_resid_filter_bias = i;
+    sid_state_changed = 1;
+    return 0;
+}
+
+static int set_sid2_resid_8580_passband(int i, void *param)
+{
+    if (i < RESID_8580_PASSBAND_MIN) {
+        i = RESID_8580_PASSBAND_MIN;
+    } else if (i > RESID_8580_PASSBAND_MAX) {
+        i = RESID_8580_PASSBAND_MAX;
+    }
+
+    sid2_resid_8580_passband = i;
+    sid_state_changed = 1;
+    return 0;
+}
+
+static int set_sid2_resid_8580_gain(int i, void *param)
+{
+    if (i < RESID_8580_FILTER_GAIN_MIN) {
+        i = RESID_8580_FILTER_GAIN_MIN;
+    } else if (i > RESID_8580_FILTER_GAIN_MAX) {
+        i = RESID_8580_FILTER_GAIN_MAX;
+    }
+
+    sid2_resid_8580_gain = i;
+    sid_state_changed = 1;
+    return 0;
+}
+
+static int set_sid2_resid_8580_filter_bias(int i, void *param)
+{
+    if (i < RESID_8580_FILTER_BIAS_MIN) {
+        i = RESID_8580_FILTER_BIAS_MIN;
+    } else if (i > RESID_8580_FILTER_BIAS_MAX) {
+        i = RESID_8580_FILTER_BIAS_MAX;
+    }
+
+    sid2_resid_8580_filter_bias = i;
+    sid_state_changed = 1;
+    return 0;
+}
+
+static int set_sid2_resid_settings_initialized(int val, void *param)
+{
+    sid2_resid_settings_initialized = val ? 1 : 0;
+    return 0;
+}
 #endif
+
+#endif
+
+void sid_get_resid_filter_for_chip(int chipno, int model,
+                                   int *passband_percentage,
+                                   int *gain_percentage,
+                                   int *filter_bias_mV)
+{
+#if defined(HAVE_RESID)
+    int use_8580 = model == SID_MODEL_8580 || model == SID_MODEL_8580D;
+
+#ifdef RASPI_COMPILE
+    if (chipno == 1 && sid_filters2 != SID2_FILTERS_SAME_AS_SID1) {
+        if (use_8580) {
+            *passband_percentage = sid2_resid_8580_passband;
+            *gain_percentage = sid2_resid_8580_gain;
+            *filter_bias_mV = sid2_resid_8580_filter_bias;
+        } else {
+            *passband_percentage = sid2_resid_passband;
+            *gain_percentage = sid2_resid_gain;
+            *filter_bias_mV = sid2_resid_filter_bias;
+        }
+        return;
+    }
+#endif
+
+    if (use_8580) {
+        *passband_percentage = sid_resid_8580_passband;
+        *gain_percentage = sid_resid_8580_gain;
+        *filter_bias_mV = sid_resid_8580_filter_bias;
+    } else {
+        *passband_percentage = sid_resid_passband;
+        *gain_percentage = sid_resid_gain;
+        *filter_bias_mV = sid_resid_filter_bias;
+    }
+#else
+    (void)chipno;
+    (void)model;
+    *passband_percentage = 0;
+    *gain_percentage = 0;
+    *filter_bias_mV = 0;
+#endif
+}
+
+void sid2_filter_settings_ensure_initialized(void)
+{
+#if defined(RASPI_COMPILE) && defined(HAVE_RESID)
+    if (sid2_resid_settings_initialized) {
+        return;
+    }
+
+    sid2_resid_passband = sid_resid_passband;
+    sid2_resid_gain = sid_resid_gain;
+    sid2_resid_filter_bias = sid_resid_filter_bias;
+    sid2_resid_8580_passband = sid_resid_8580_passband;
+    sid2_resid_8580_gain = sid_resid_8580_gain;
+    sid2_resid_8580_filter_bias = sid_resid_8580_filter_bias;
+    sid2_resid_settings_initialized = 1;
+    sid_state_changed = 1;
+#endif
+}
 
 #ifdef HAVE_HARDSID
 static int set_sid_hardsid_main(int val, void *param)
@@ -450,6 +671,22 @@ static const resource_int_t resid_resources_int[] = {
       &sid_resid_8580_gain, set_sid_resid_8580_gain, NULL },
     { "SidResid8580FilterBias", RESID_8580_FILTER_BIAS_DEFAULT, RES_EVENT_NO, NULL,
       &sid_resid_8580_filter_bias, set_sid_resid_8580_filter_bias, NULL },
+#if defined(RASPI_COMPILE) && defined(HAVE_RESID)
+    { "Sid2ResidPassband", RESID_6581_PASSBAND_DEFAULT, RES_EVENT_NO, NULL,
+      &sid2_resid_passband, set_sid2_resid_passband, NULL },
+    { "Sid2ResidGain", RESID_6581_FILTER_GAIN_DEFAULT, RES_EVENT_NO, NULL,
+      &sid2_resid_gain, set_sid2_resid_gain, NULL },
+    { "Sid2ResidFilterBias", RESID_6581_FILTER_BIAS_DEFAULT, RES_EVENT_NO, NULL,
+      &sid2_resid_filter_bias, set_sid2_resid_filter_bias, NULL },
+    { "Sid2Resid8580Passband", RESID_8580_PASSBAND_DEFAULT, RES_EVENT_NO, NULL,
+      &sid2_resid_8580_passband, set_sid2_resid_8580_passband, NULL },
+    { "Sid2Resid8580Gain", RESID_8580_FILTER_GAIN_DEFAULT, RES_EVENT_NO, NULL,
+      &sid2_resid_8580_gain, set_sid2_resid_8580_gain, NULL },
+    { "Sid2Resid8580FilterBias", RESID_8580_FILTER_BIAS_DEFAULT, RES_EVENT_NO, NULL,
+      &sid2_resid_8580_filter_bias, set_sid2_resid_8580_filter_bias, NULL },
+    { "Sid2ResidSettingsInitialized", 0, RES_EVENT_NO, NULL,
+      &sid2_resid_settings_initialized, set_sid2_resid_settings_initialized, NULL },
+#endif
     RESOURCE_INT_LIST_END
 };
 #endif
@@ -470,6 +707,12 @@ static resource_int_t common_resources_int[] = {
     /* CAUTION: position is hardcoded below */
     { "SidModel", SID_MODEL_DEFAULT, RES_EVENT_SAME, NULL,
       &sid_model, set_sid_model, NULL },
+#ifdef RASPI_COMPILE
+    { "Sid2Model", SID_MODEL_DEFAULT, RES_EVENT_SAME, NULL,
+      &sid_model2, set_sid_model2, NULL },
+    { "Sid2Filters", SID2_FILTERS_SAME_AS_SID1, RES_EVENT_SAME, NULL,
+      &sid_filters2, set_sid_filters2, NULL },
+#endif
     RESOURCE_INT_LIST_END
 };
 
@@ -516,19 +759,11 @@ int sid_common_resources_init(void)
 #else
     common_resources_int[0].factory_value = SID_ENGINE_FASTSID;
 #endif
-    /* setup the default for sid model */
-    common_resources_int[2].factory_value = SID_MODEL_6581;
-#ifdef HAVE_RESID
-    if (machine_class == VICE_MACHINE_C64DTV) {
-        common_resources_int[2].factory_value = SID_MODEL_DTVSID;
-    } else
+    /* setup the default for both software SID models */
+    common_resources_int[2].factory_value = sid_default_model();
+#ifdef RASPI_COMPILE
+    common_resources_int[3].factory_value = sid_default_model();
 #endif
-    if ((machine_class == VICE_MACHINE_C128) ||
-        (machine_class == VICE_MACHINE_C64) ||
-        (machine_class == VICE_MACHINE_C64SC) ||
-        (machine_class == VICE_MACHINE_SCPU64)){
-        common_resources_int[2].factory_value = SID_MODEL_8580;
-    }
 
 #ifdef HAVE_HARDSID
     if (hardsid_available()) {

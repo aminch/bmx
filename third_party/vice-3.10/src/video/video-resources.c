@@ -968,8 +968,10 @@ int video_resources_chip_init(const char *chipname,
             resources_chip_colors[0].factory_value = 1000; /* saturation */
             resources_chip_colors[1].factory_value = 1250; /* contrast */
         } else if (!strcmp(chipname, "VICII")) {
-            resources_chip_colors[0].factory_value = 1250; /* saturation */
-            resources_chip_colors[1].factory_value = 1250; /* contrast */
+            /* BMX uses a precomputed external RGB palette for the VIC-II.
+               Keep its color adjustments neutral to preserve that palette. */
+            resources_chip_colors[0].factory_value = 1000; /* saturation */
+            resources_chip_colors[1].factory_value = 1000; /* contrast */
         } else if (!strcmp(chipname, "TED")) {
             resources_chip_colors[0].factory_value = 1250; /* saturation */
         } else if (!strcmp(chipname, "Crtc")) {

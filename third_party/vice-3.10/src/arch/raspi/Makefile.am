@@ -37,6 +37,12 @@ noinst_LIBRARIES = libarch.a
 libarch_a_SOURCES = \
 	archdep.h \
 	archdep.c \
+	../shared/archdep_chdir.c \
+	../shared/archdep_current_dir.c \
+	../shared/archdep_dir.c \
+	../shared/archdep_getcwd.c \
+	../shared/archdep_mkdir.c \
+	../shared/archdep_rmdir.c \
 	mousedrv.h \
 	mousedrv.c \
 	missing.c \

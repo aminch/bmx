@@ -27,9 +27,17 @@
 #ifndef RASPI_MENU_USB_H
 #define RASPI_MENU_USB_H
 
+#include "circle.h"
 #include "ui.h"
 
 void build_usb_menu(int dev, struct menu_item *parent);
 int add_pot_values(int *value, int potx, int poty);
+void menu_usb_mapping_initialize(void);
+void menu_usb_mapping_finish_load(
+    const int mode_was_loaded[MAX_USB_DEVICES],
+    const int loaded_mode[MAX_USB_DEVICES],
+    const int mapping_was_loaded[MAX_USB_DEVICES]);
+int menu_usb_mapping_mode(int dev);
+void menu_usb_gamepad_info_changed(void);
 
 #endif

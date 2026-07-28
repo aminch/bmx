@@ -66,13 +66,14 @@ struct sound_s
 
 typedef struct sound_s sound_t;
 
-static sound_t *resid_open(uint8_t *sidstate)
+static sound_t *resid_open(uint8_t *sidstate, int chip_num)
 {
     sound_t *psid;
     int i;
 
     psid = new sound_t;
     psid->sid = new reSID_dtv::SID;
+    (void)chip_num;
 
     for (i = 0x00; i <= 0x18; i++) {
         psid->sid->write(i, sidstate[i]);

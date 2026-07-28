@@ -42,7 +42,7 @@ int custom_gpio_pins[NUM_GPIO_PINS] = {
     5, 20, 19, 16, 13, 6, 12, 26, 8, 25, 24,
     18, 23, 27, 17, 22, 4, 7, 21, 2, 3, 9, 10 };
 
-#define NUM_GPIO_BINDINGS 44
+#define NUM_GPIO_BINDINGS 45
 
 // Button function and bank (if applicable)
 static int menu_items_list[NUM_GPIO_BINDINGS][2] = {
@@ -90,6 +90,7 @@ static int menu_items_list[NUM_GPIO_BINDINGS][2] = {
     { BTN_ASSIGN_ATTACH_DISK_9, 0 },
     { BTN_ASSIGN_ATTACH_DISK_10, 0 },
     { BTN_ASSIGN_ATTACH_DISK_11, 0 },
+    { BTN_ASSIGN_SID_FILTER_OSD, 0 },
 };
 
 static void menu_value_changed(struct menu_item *item) {
@@ -118,6 +119,12 @@ void build_gpio_menu(struct menu_item *root) {
         }
 
         item->choice_ints[j] = binding_value;
+
+        if (func == BTN_ASSIGN_SID_FILTER_OSD &&
+            (emux_machine_class == BMC64_MACHINE_CLASS_PET ||
+             emux_machine_class == BMC64_MACHINE_CLASS_PLUS4EMU)) {
+           item->choice_disabled[j] = 1;
+        }
 
         if (gpio_bindings[i] == binding_value) {
            item->value = j;

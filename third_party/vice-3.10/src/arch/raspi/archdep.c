@@ -247,16 +247,6 @@ FILE *archdep_mkstemp_fd(char **filename, const char *mode) {
   return fd;
 }
 
-int archdep_mkdir(const char *pathname, int mode) {
-  log_error(LOG_DEFAULT, "archdep_mkdir unimpl: %s", pathname);
-  return 0;
-}
-
-int archdep_rmdir(const char *pathname) {
-  log_error(LOG_DEFAULT, "archdep_rmdir unimpl: %s", pathname);
-  return 0;
-}
-
 int archdep_access(const char *pathname, int mode) {
   struct stat st;
 
@@ -265,19 +255,6 @@ int archdep_access(const char *pathname, int mode) {
   }
 
   return stat(pathname, &st);
-}
-
-int archdep_chdir(const char *path) { return 0; }
-
-char *archdep_current_dir(void) { return lib_strdup("."); }
-
-char *archdep_getcwd(char *buf, size_t size) {
-  if (buf == NULL || size < 2) {
-    return NULL;
-  }
-
-  strcpy(buf, ".");
-  return buf;
 }
 
 int archdep_close(int fd) { return close(fd); }
@@ -291,18 +268,6 @@ int archdep_fseeko(FILE *stream, off_t offset, int whence) {
 off_t archdep_ftello(FILE *stream) { return (off_t)ftell(stream); }
 
 int archdep_remove(const char *path) { return remove(path); }
-
-archdep_dir_t *archdep_opendir(const char *path, int mode) { return NULL; }
-
-const char *archdep_readdir(archdep_dir_t *dir) { return NULL; }
-
-void archdep_closedir(archdep_dir_t *dir) {}
-
-void archdep_rewinddir(archdep_dir_t *dir) {}
-
-void archdep_seekdir(archdep_dir_t *dir, int pos) {}
-
-int archdep_telldir(const archdep_dir_t *dir) { return 0; }
 
 int archdep_stat(const char *file_name, size_t *len,
                  unsigned int *isdir) {

@@ -383,7 +383,9 @@ void emux_set_joy_pot_x(int port, int value);
 void emux_set_joy_pot_y(int port, int value);
 
 void emux_add_tape_options(struct menu_item* parent);
-void emux_add_sound_options(struct menu_item* parent);
+void emux_add_sound_options(struct menu_item* emulation_parent,
+                            struct menu_item* sid_parent,
+                            struct menu_item* sound_parent);
 
 void emux_video_color_setting_changed(int display_num);
 

@@ -36,8 +36,7 @@ extern void mousedrv_init(void);
 
 extern void mousedrv_mouse_changed(void);
 
-extern int mousedrv_get_x(void);
-extern int mousedrv_get_y(void);
-extern unsigned long mousedrv_get_timestamp(void);
+#define MOUSEDRV_HAS_POLL
+extern void mousedrv_poll(void);
 
 #endif

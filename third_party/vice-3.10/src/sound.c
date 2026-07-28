@@ -734,7 +734,7 @@ static const resource_int_t resources_int[] = {
       (void *)&volume, set_volume, NULL },
     { "SoundOutput", ARCHDEP_SOUND_OUTPUT_MODE, RES_EVENT_NO, NULL,
       (void *)&output_option, set_output_option, NULL },
-    { "SoundEmulateOnWarp", 1, RES_EVENT_NO, NULL,
+    { "SoundEmulateOnWarp", 0, RES_EVENT_NO, NULL,
       (void *)&sound_emulation_enabled_on_warp, set_sound_emulation_enabled_on_warp, NULL },
     RESOURCE_INT_LIST_END
 };

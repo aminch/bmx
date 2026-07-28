@@ -368,19 +368,42 @@ long func_to_keycode(int btn_func) {
 
 }
 
+class CKernel::USBPlugAndPlayTask : public CTask {
+public:
+  explicit USBPlugAndPlayTask(CKernel *kernel) : mKernel(kernel) {
+    SetName("usbpnp");
+  }
+
+  void Run(void) override {
+    for (;;) {
+      mKernel->UpdateUSBPlugAndPlay();
+      CScheduler::Get()->MsSleep(100);
+    }
+  }
+
+private:
+  CKernel *mKernel;
+};
+
 CKernel::CKernel(void)
     : ViceStdioApp("vice"), mViceSound(nullptr),
-      mUSBMouse(nullptr), mUSBServicesReady(FALSE),
+      mUSBPlugAndPlayTask(nullptr), mUSBMouse(nullptr),
+      mUSBGamepadInfoLock(TASK_LEVEL), mUSBGamepadInfoPending(FALSE),
+      mUSBOutputAvailable(FALSE), mUSBAudioChangePending(FALSE),
       mNumJoy(emu_get_num_joysticks()),
       mVolume(100), mSoundOutputPriority(ViceSound::DefaultOutputPriority()),
+      mSoundSampleRate(SAMPLE_RATE),
       mNumCoresComplete(0),
       mNeedSoundInit(false), mNumSoundChannels(1) {
   static_kernel = this;
   mod_states = 0;
   memset(key_states, 0, MAX_KEY_CODES * sizeof(bool));
   memset(key_mod_states, 0, MAX_KEY_CODES * sizeof(int));
-  memset(mUSBKeyboards, 0, sizeof mUSBKeyboards);
-  memset(mUSBGamepads, 0, sizeof mUSBGamepads);
+  for (unsigned i = 0; i < MAX_USB_DEVICES; i++) {
+    mUSBKeyboards[i] = nullptr;
+    mUSBGamepads[i] = nullptr;
+  }
+  memset(&mUSBGamepadInfo, 0, sizeof mUSBGamepadInfo);
 
   // Only used for pins that are used as buttons. See viceapp.h.
   for (int i = 0; i < NUM_GPIO_PINS; i++) {
@@ -435,6 +458,7 @@ static void exec_button_func(int button_func, int is_press, int is_ui) {
      case BTN_ASSIGN_STATUS_TOGGLE:
      case BTN_ASSIGN_TAPE_MENU:
      case BTN_ASSIGN_CART_MENU:
+     case BTN_ASSIGN_SID_FILTER_OSD:
      case BTN_ASSIGN_CART_FREEZE:
      case BTN_ASSIGN_RESET_MENU:
      case BTN_ASSIGN_RESET_HARD:
@@ -719,6 +743,44 @@ if (static_kernel->circle_get_ticks() - entry_start >= entry_delay) {
   }
 }
 
+void CKernel::MouseRemovedHandler(CDevice *pDevice, void *pContext) {
+  CKernel *kernel = static_cast<CKernel *>(pContext);
+  assert(kernel != nullptr);
+
+  if (kernel->mUSBMouse == static_cast<CMouseDevice *>(pDevice)) {
+    kernel->mUSBMouse = nullptr;
+    printf("usb: mouse1 removed\r\n");
+  }
+}
+
+void CKernel::KeyRemovedHandler(CDevice *pDevice, void *pContext) {
+  CKernel *kernel = static_cast<CKernel *>(pContext);
+  assert(kernel != nullptr);
+
+  for (unsigned i = 0; i < MAX_USB_DEVICES; i++) {
+    if (kernel->mUSBKeyboards[i] ==
+        static_cast<CUSBKeyboardDevice *>(pDevice)) {
+      kernel->mUSBKeyboards[i] = nullptr;
+      printf("usb: keyboard ukbd%u removed\r\n", i + 1);
+      break;
+    }
+  }
+}
+
+void CKernel::GamePadRemovedHandler(CDevice *pDevice, void *pContext) {
+  CKernel *kernel = static_cast<CKernel *>(pContext);
+  assert(kernel != nullptr);
+
+  for (unsigned i = 0; i < MAX_USB_DEVICES; i++) {
+    if (kernel->mUSBGamepads[i] ==
+        static_cast<CUSBGamePadDevice *>(pDevice)) {
+      kernel->mUSBGamepads[i] = nullptr;
+      printf("usb: gamepad upad%u removed\r\n", i + 1);
+      break;
+    }
+  }
+}
+
 void CKernel::SetupUSBKeyboard() {
   unsigned num_keyboards = 0;
   for (unsigned i = 0; i < MAX_USB_DEVICES; i++) {
@@ -730,6 +792,7 @@ void CKernel::SetupUSBKeyboard() {
 
     if (pKeyboard != mUSBKeyboards[i]) {
       if (pKeyboard) {
+        pKeyboard->RegisterRemovedHandler(KeyRemovedHandler, this);
         pKeyboard->RegisterKeyStatusHandlerRaw(KeyStatusHandlerRaw);
         printf("usb: registered keyboard ukbd%u\r\n", i + 1);
       }
@@ -750,6 +813,7 @@ void CKernel::SetupUSBMouse() {
 
   if (pMouse != mUSBMouse) {
     if (pMouse) {
+      pMouse->RegisterRemovedHandler(MouseRemovedHandler, this);
       pMouse->RegisterStatusHandler(MouseStatusHandler);
       printf("usb: registered mouse1\r\n");
     }
@@ -762,6 +826,8 @@ void CKernel::SetupUSBGamepads() {
   int num_buttons[MAX_USB_DEVICES] = {0, 0, 0, 0};
   int num_axes[MAX_USB_DEVICES] = {0, 0, 0, 0};
   int num_hats[MAX_USB_DEVICES] = {0, 0, 0, 0};
+  int known_mapping[MAX_USB_DEVICES] = {0, 0, 0, 0};
+  int alternative_mapping[MAX_USB_DEVICES] = {0, 0, 0, 0};
   for (unsigned i = 0; i < MAX_USB_DEVICES; i++) {
     CString DeviceName;
     DeviceName.Format("upad%u", i + 1);
@@ -771,6 +837,7 @@ void CKernel::SetupUSBGamepads() {
 
     if (game_pad != mUSBGamepads[i]) {
       if (game_pad) {
+        game_pad->RegisterRemovedHandler(GamePadRemovedHandler, this);
         game_pad->RegisterStatusHandler(GamePadStatusHandler);
         printf("usb: registered gamepad upad%u\r\n", i + 1);
       }
@@ -787,11 +854,83 @@ void CKernel::SetupUSBGamepads() {
     num_axes[i] = pState->naxes;
     num_hats[i] = pState->nhats;
     num_buttons[i] = pState->nbuttons;
+    unsigned properties = game_pad->GetProperties();
+    known_mapping[i] = (properties & GamePadPropertyIsKnown) != 0;
+    alternative_mapping[i] =
+        (properties & GamePadPropertyHasAlternativeMapping) != 0;
     num_pads = i + 1;
   }
 
-  // Tell the emulator what we found
-  emu_set_gamepad_info(num_pads, num_buttons, num_axes, num_hats);
+  mUSBGamepadInfoLock.Acquire();
+  mUSBGamepadInfo.numPads = num_pads;
+  memcpy(mUSBGamepadInfo.numButtons, num_buttons, sizeof num_buttons);
+  memcpy(mUSBGamepadInfo.numAxes, num_axes, sizeof num_axes);
+  memcpy(mUSBGamepadInfo.numHats, num_hats, sizeof num_hats);
+  memcpy(mUSBGamepadInfo.knownMapping, known_mapping, sizeof known_mapping);
+  memcpy(mUSBGamepadInfo.alternativeMapping, alternative_mapping,
+         sizeof alternative_mapping);
+  mUSBGamepadInfoPending = TRUE;
+  mUSBGamepadInfoLock.Release();
+}
+
+void CKernel::ApplyUSBGamepadInfo() {
+  USBGamepadInfo gamepad_info;
+
+  mUSBGamepadInfoLock.Acquire();
+  if (!mUSBGamepadInfoPending) {
+    mUSBGamepadInfoLock.Release();
+    return;
+  }
+  gamepad_info = mUSBGamepadInfo;
+  mUSBGamepadInfoPending = FALSE;
+  mUSBGamepadInfoLock.Release();
+
+  emu_set_gamepad_info(gamepad_info.numPads, gamepad_info.numButtons,
+                       gamepad_info.numAxes, gamepad_info.numHats,
+                       gamepad_info.knownMapping,
+                       gamepad_info.alternativeMapping);
+}
+
+void CKernel::UpdateUSBPlugAndPlay() {
+  boolean usb_changed = mUSBHCII.UpdatePlugAndPlay();
+  if (usb_changed) {
+    printf("usb: plug-and-play update\r\n");
+    SetupUSBKeyboard();
+    printf("usb: keyboard scan complete\r\n");
+    SetupUSBMouse();
+    printf("usb: mouse scan complete\r\n");
+    SetupUSBGamepads();
+    printf("usb: gamepad scan complete\r\n");
+
+    __atomic_store_n(&mUSBOutputAvailable, ViceSound::USBOutputAvailable(),
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&mUSBAudioChangePending, TRUE, __ATOMIC_RELEASE);
+  }
+}
+
+void CKernel::ApplyUSBAudioChange() {
+  if (!__atomic_exchange_n(&mUSBAudioChangePending, FALSE,
+                           __ATOMIC_ACQUIRE)) {
+    return;
+  }
+
+  if (mViceSound) {
+    boolean usb_output_available =
+        __atomic_load_n(&mUSBOutputAvailable, __ATOMIC_RELAXED);
+
+    unsigned sample_rate = ViceSound::SelectSampleRate();
+    if (sample_rate != mSoundSampleRate) {
+      printf("sound: sample rate change %u -> %u Hz, reopening output\r\n",
+             mSoundSampleRate, sample_rate);
+      if (emu_set_sound_sample_rate((int) sample_rate) == 0) {
+        return;
+      }
+      printf("sound: cannot update VICE sample rate\r\n");
+    }
+
+    mViceSound->USBPlugAndPlayChanged(usb_output_available,
+                                     mSoundOutputPriority);
+  }
 }
 
 ViceApp::TShutdownMode CKernel::Run(void) {
@@ -809,30 +948,31 @@ ViceApp::TShutdownMode CKernel::Run(void) {
   SetupUSBGamepads();
   printf("boot: setup usb gamepads ready\r\n");
 
+#ifndef BMC64_USE_EMU_MULTICORE
+  ApplyUSBGamepadInfo();
+#endif
+
   emu_set_demo_mode(mViceOptions.DemoEnabled());
   printf("boot: demo mode set\r\n");
 
-  __atomic_store_n(&mUSBServicesReady, TRUE, __ATOMIC_RELEASE);
   printf("boot: usb plug-and-play ready\r\n");
 
 #ifndef BMC64_USE_EMU_MULTICORE
+  mUSBPlugAndPlayTask = new USBPlugAndPlayTask(this);
   printf("boot: launching emulator on core 0\r\n");
   mEmulatorCore->LaunchEmulator(mTimingOption);
   printf("boot: emulator returned\r\n");
 #else
-  // This core will do nothing but service interrupts from
-  // usb or gpio.
-  printf("Core 0 idle\n");
+  printf("Core 0 servicing USB plug-and-play\n");
 
+  for (;;) {
 #if AARCH == 64
-  asm("dsb sy\n\t"
-      "1: wfi\n\t"
-      "b 1b\n\t");
+    asm volatile("dsb sy\n\twfi" ::: "memory");
 #else
-  asm("dsb\n\t"
-      "1: wfi\n\t"
-      "b 1b\n\t");
+    asm volatile("dsb\n\twfi" ::: "memory");
 #endif
+    UpdateUSBPlugAndPlay();
+  }
 #endif
   return ShutdownHalt;
 }
@@ -1244,10 +1384,12 @@ unsigned long CKernel::circle_get_ticks() { return mTimer.GetClockTicks(); }
 // Called from VICE: Core 1
 int CKernel::circle_sound_init(const char *param, int *speed, int *fragsize,
                                int *fragnr, int *channels) {
-  *speed = SAMPLE_RATE;
+  mSoundSampleRate = ViceSound::SelectSampleRate();
+  *speed = mSoundSampleRate;
   *fragsize = FRAG_SIZE;
   *fragnr = NUM_FRAGS;
   mNumSoundChannels = *channels;
+  printf("boot: sound sample rate %u Hz\r\n", mSoundSampleRate);
 
   // NOTE: We init sound after boot is complete to avoid an initial
   // sound sync issue if a cartridge is attached. But if it's already
@@ -1257,6 +1399,7 @@ int CKernel::circle_sound_init(const char *param, int *speed, int *fragsize,
 #endif
   if (mViceSound) {
      mViceSound->CancelPlayback();
+     mViceSound->SetSampleRate(mSoundSampleRate);
      mViceSound->Playback(vol_percent_to_vchiq(mVolume), mNumSoundChannels,
                           mSoundOutputPriority);
   }
@@ -1268,6 +1411,7 @@ int CKernel::circle_sound_init(const char *param, int *speed, int *fragsize,
 
 // Called from VICE: Core 1
 int CKernel::circle_sound_write(int16_t *pbuf, size_t nr) {
+  ApplyUSBAudioChange();
   if (mViceSound) {
     return mViceSound->AddChunk(pbuf, nr);
   }
@@ -1283,6 +1427,7 @@ int CKernel::circle_sound_suspend(void) { return 0; }
 int CKernel::circle_sound_resume(void) { return 0; }
 
 int CKernel::circle_sound_bufferspace(void) {
+  ApplyUSBAudioChange();
   if (mViceSound) {
     return mViceSound->BufferSpaceSamples();
   }
@@ -1290,18 +1435,8 @@ int CKernel::circle_sound_bufferspace(void) {
 }
 
 void CKernel::circle_yield(void) {
-  if (__atomic_load_n(&mUSBServicesReady, __ATOMIC_ACQUIRE)) {
-    boolean usb_changed = mUSBHCII.UpdatePlugAndPlay();
-#if RASPPI >= 4
-    mUSBHCII.ProcessRecoveries();
-#endif
-    if (usb_changed) {
-      printf("usb: plug-and-play update\r\n");
-      SetupUSBKeyboard();
-      SetupUSBMouse();
-      SetupUSBGamepads();
-    }
-  }
+  ApplyUSBGamepadInfo();
+  ApplyUSBAudioChange();
   CScheduler::Get()->Yield();
 }
 
@@ -1520,7 +1655,8 @@ void CKernel::circle_check_gpio() {
 #ifdef BMC64_USE_EMU_MULTICORE
   circle_lock_acquire();
   if (mNeedSoundInit && mNumCoresComplete >= 2) {
-     mViceSound = new ViceSound(&mInterrupt, mViceOptions.GetAudioOut());
+     mViceSound = new ViceSound(&mInterrupt, mViceOptions.GetAudioOut(),
+                                mSoundSampleRate);
      if (mViceSound) {
        mViceSound->Playback(vol_percent_to_vchiq(mVolume), mNumSoundChannels,
                             mSoundOutputPriority);
@@ -1652,7 +1788,8 @@ void CKernel::circle_boot_complete() {
     if (mNumCoresComplete >= 2) {
        // Cores 1/2 are done initing sound tables before we tried to
        // start playback device.
-       mViceSound = new ViceSound(&mInterrupt, mViceOptions.GetAudioOut());
+       mViceSound = new ViceSound(&mInterrupt, mViceOptions.GetAudioOut(),
+                                  mSoundSampleRate);
        if (!mViceSound) {
          circle_lock_release();
          return;
@@ -1667,7 +1804,8 @@ void CKernel::circle_boot_complete() {
     }
     circle_lock_release();
 #else
-    mViceSound = new ViceSound(&mInterrupt, mViceOptions.GetAudioOut());
+    mViceSound = new ViceSound(&mInterrupt, mViceOptions.GetAudioOut(),
+                               mSoundSampleRate);
     if (!mViceSound) {
       return;
     }

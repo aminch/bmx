@@ -26,9 +26,12 @@ extern "C" {
 
 #include <circle/sched/scheduler.h>
 
+#include <circle/devicenameservice.h>
 #include <circle/koptions.h>
 #include <circle/sound/hdmisoundbasedevice.h>
 #include <circle/sound/usbsoundbasedevice.h>
+#include <circle/string.h>
+#include <circle/usb/usbaudiostreaming.h>
 
 namespace {
 
@@ -51,6 +54,43 @@ bool sound_device_matches(const char *configured, const char *name) {
 bool sound_device_is_usb(const char *configured) {
   return sound_device_matches(configured, "usb") ||
          sound_device_matches(configured, "sndusb");
+}
+
+bool sample_rate_supported(
+    const CUSBAudioStreamingDevice::TDeviceInfo &info,
+    unsigned sample_rate) {
+  for (unsigned i = 0; i < info.SampleRateRanges; i++) {
+    const unsigned min_rate = info.SampleRateRange[i].Min;
+    const unsigned max_rate = info.SampleRateRange[i].Max;
+    const unsigned resolution = info.SampleRateRange[i].Resolution;
+    if (min_rate <= sample_rate && sample_rate <= max_rate &&
+        (!resolution || (sample_rate - min_rate) % resolution == 0)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+CUSBAudioStreamingDevice *find_usb_output_device(void) {
+  for (unsigned subdevice = 1; ; subdevice++) {
+    CString device_name;
+    device_name.Format("uaudio1-%u", subdevice);
+
+    CDevice *device =
+        CDeviceNameService::Get()->GetDevice(device_name, FALSE);
+    if (!device) {
+      break;
+    }
+
+    CUSBAudioStreamingDevice *streaming_device =
+        static_cast<CUSBAudioStreamingDevice *>(device);
+    if (streaming_device->GetDeviceInfo().IsOutput) {
+      return streaming_device;
+    }
+  }
+
+  return nullptr;
 }
 
 bool start_sound_device(CSoundBaseDevice *device, const char *name,
@@ -80,11 +120,42 @@ SoundOutputPriority ViceSound::DefaultOutputPriority(void) {
   return SOUND_OUTPUT_PRIORITY_HDMI_USB;
 }
 
+unsigned ViceSound::SelectSampleRate(void) {
+  CUSBAudioStreamingDevice *streaming_device = find_usb_output_device();
+  if (streaming_device) {
+    CUSBAudioStreamingDevice::TDeviceInfo info =
+        streaming_device->GetDeviceInfo();
+
+    static const unsigned preferred_rates[] = {SAMPLE_RATE, 48000};
+    for (unsigned i = 0; i < sizeof preferred_rates / sizeof preferred_rates[0];
+         i++) {
+      if (sample_rate_supported(info, preferred_rates[i])) {
+        return preferred_rates[i];
+      }
+    }
+
+    for (unsigned i = 0; i < info.SampleRateRanges; i++) {
+      if (info.SampleRateRange[i].Min) {
+        return info.SampleRateRange[i].Min;
+      }
+    }
+  }
+
+  return SAMPLE_RATE;
+}
+
+boolean ViceSound::USBOutputAvailable(void) {
+  return find_usb_output_device() != nullptr;
+}
+
 ViceSound::ViceSound(CInterruptSystem *pInterrupt,
-                     TVCHIQSoundDestination Destination)
+                     TVCHIQSoundDestination Destination,
+                     unsigned SampleRate)
     : mSoundDevice(nullptr),
+      mOutputDevice(OutputNone),
       mInterrupt(pInterrupt),
       mDestination(Destination),
+      mSampleRate(SampleRate),
       mQueueSizeFrames(FRAG_SIZE * NUM_FRAGS),
       mNumChannels(2),
       mVolumePercent(100) {}
@@ -94,10 +165,11 @@ ViceSound::~ViceSound(void) {
 }
 
 boolean ViceSound::StartHDMI(void) {
-  mSoundDevice = new CHDMISoundBaseDevice(mInterrupt, SAMPLE_RATE,
+  mSoundDevice = new CHDMISoundBaseDevice(mInterrupt, mSampleRate,
                                           HDMI_CHUNK_WORDS);
   if (start_sound_device(mSoundDevice, "hdmi",
                          mQueueSizeFrames, mNumChannels)) {
+    mOutputDevice = OutputHDMI;
     return TRUE;
   }
 
@@ -107,11 +179,12 @@ boolean ViceSound::StartHDMI(void) {
 }
 
 boolean ViceSound::StartUSB(void) {
-  mSoundDevice = new CUSBSoundBaseDevice(SAMPLE_RATE,
+  mSoundDevice = new CUSBSoundBaseDevice(mSampleRate,
                                          CUSBSoundBaseDevice::DeviceModeTXOnly,
                                          0);
   if (start_sound_device(mSoundDevice, "usb",
                          mQueueSizeFrames, mNumChannels)) {
+    mOutputDevice = OutputUSB;
     return TRUE;
   }
 
@@ -139,6 +212,29 @@ boolean ViceSound::PlaybackActive(void) const {
   return mSoundDevice != nullptr && mSoundDevice->IsActive();
 }
 
+void ViceSound::USBPlugAndPlayChanged(boolean usbOutputAvailable,
+                                      SoundOutputPriority priority) {
+  if (PlaybackActive()) {
+    if (mOutputDevice == OutputUSB && usbOutputAvailable) {
+      return;
+    }
+
+    if (   mOutputDevice == OutputHDMI
+        && (   priority == SOUND_OUTPUT_PRIORITY_HDMI_USB
+            || !usbOutputAvailable)) {
+      return;
+    }
+  }
+
+  const char *previous = mOutputDevice == OutputUSB ? "usb"
+                         : mOutputDevice == OutputHDMI ? "hdmi"
+                                                       : "none";
+  printf("sound: USB topology changed, restarting %s output\r\n", previous);
+  SoundOutputPriority restart_priority =
+      usbOutputAvailable ? priority : SOUND_OUTPUT_PRIORITY_HDMI_USB;
+  Playback(mVolumePercent, mNumChannels, restart_priority);
+}
+
 void ViceSound::CancelPlayback(void) {
   if (!mSoundDevice) {
     return;
@@ -147,6 +243,12 @@ void ViceSound::CancelPlayback(void) {
   mSoundDevice->Cancel();
   delete mSoundDevice;
   mSoundDevice = nullptr;
+  mOutputDevice = OutputNone;
+}
+
+void ViceSound::SetSampleRate(unsigned SampleRate) {
+  assert(!mSoundDevice);
+  mSampleRate = SampleRate;
 }
 
 void ViceSound::SetControl(int nVolume, TVCHIQSoundDestination Destination) {
@@ -184,6 +286,10 @@ unsigned ViceSound::AddChunk(s16 *pBuffer, unsigned nChunkSize) {
 
   size_t written = 0;
   while (written < total_bytes) {
+    if (!mSoundDevice->IsActive()) {
+      break;
+    }
+
     int consumed = mSoundDevice->Write(((const char *) write_buffer) + written,
                                        total_bytes - written);
     if (consumed > 0) {
@@ -201,7 +307,7 @@ unsigned ViceSound::AddChunk(s16 *pBuffer, unsigned nChunkSize) {
 }
 
 unsigned ViceSound::BufferSpaceSamples() {
-  if (!mSoundDevice) {
+  if (!mSoundDevice || !mSoundDevice->IsActive()) {
     return mQueueSizeFrames;
   }
 

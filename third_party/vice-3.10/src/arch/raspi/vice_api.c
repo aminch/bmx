@@ -97,9 +97,43 @@ static const char *raspi_joydev_name(int dev_id)
 struct menu_item *sid_dual_item;
 struct menu_item *sid_base_address_item;
 struct menu_item *sid_engine_item;
-struct menu_item *sid_model_item[2];
+struct menu_item *sid_model_item;
+struct menu_item *sid_model2_item;
 struct menu_item *sid_filter_item;
+struct menu_item *sid_filter2_item;
 struct menu_item *sid_resampling_item;
+
+struct sid_resid_menu_items {
+  struct menu_item *settings;
+  struct menu_item *passband_6581;
+  struct menu_item *gain_6581;
+  struct menu_item *bias_6581;
+  struct menu_item *passband_8580;
+  struct menu_item *gain_8580;
+  struct menu_item *bias_8580;
+};
+
+enum {
+  SID_FILTER_OSD_PASSBAND,
+  SID_FILTER_OSD_GAIN,
+  SID_FILTER_OSD_BIAS,
+  SID_FILTER_OSD_RANGE_COUNT
+};
+
+static struct sid_resid_menu_items sid_resid_items[2];
+static struct menu_item *sid_filter_osd_sid2_item;
+static struct menu_item
+    *sid_filter_osd_ranges[2][SID_FILTER_OSD_RANGE_COUNT];
+static int sid_filter_osd_models[2];
+struct menu_item *sound_emulation_item;
+struct menu_item *sound_warp_item;
+struct menu_item *datasette_sound_item;
+struct menu_item *datasette_sound_volume_item;
+struct menu_item *audio_leak_vicii_item;
+struct menu_item *audio_leak_vdc_item;
+struct menu_item *audio_leak_vic_item;
+struct menu_item *audio_leak_ted_item;
+struct menu_item *audio_leak_crtc_item;
 
 struct menu_item *keyboard_mapping_item;
 
@@ -115,13 +149,26 @@ struct menu_item *adapter_type_item;
 
 void raspi_keymap_changed(int, int, signed long);
 
+static void sync_sid_menu_items(void);
+static void sync_sound_menu_items(void);
+
 static void reopen_sound_after_sid_menu_change(void) {
   sound_close();
   sound_open();
 }
 
+static int machine_supports_dual_sid(void) {
+  return (machine_class == VICE_MACHINE_C64 ||
+          machine_class == VICE_MACHINE_C64SC ||
+          machine_class == VICE_MACHINE_SCPU64 ||
+          machine_class == VICE_MACHINE_C128) &&
+         circle_get_model() >= 2;
+}
+
 // Make sure SID options are sane for this model
 static void check_sid_options() {
+  int engine;
+  int model;
   int value;
 
   resources_get_int("SidResidSampling", &value);
@@ -135,17 +182,17 @@ static void check_sid_options() {
      }
   }
 
-  // These can never change and must match the logic in
-  // viceemulatorcore.cpp.
-  //if (circle_get_arm_clock() < 1400000000) {
-     resources_set_int("SidResidPassband", 60);
-     resources_set_int("SidResid8580Passband", 60);
-  //} else {
-  //   resources_set_int("SidResidPassband", 90);
-  //   resources_set_int("SidResid8580Passband", 90);
-  //}
-  resources_set_int("SidResidGain", 97);
-  resources_set_int("SidResid8580Gain", 97);
+  // Digi boost is implemented by reSID. FastSID treats this model like a
+  // regular 8580, so keep the stored model and the visible menu choice sane.
+  resources_get_int("SidEngine", &engine);
+  resources_get_int("SidModel", &model);
+  if (engine != SID_ENGINE_RESID && model == SID_MODEL_8580D) {
+     resources_set_int("SidModel", SID_MODEL_8580);
+  }
+  resources_get_int("Sid2Model", &model);
+  if (engine != SID_ENGINE_RESID && model == SID_MODEL_8580D) {
+     resources_set_int("Sid2Model", SID_MODEL_8580);
+  }
 
   // When dual sid is enabled, SidStereo=1, SoundOutput=2 and
   // the audio driver must be configured for 2 channel output.
@@ -208,6 +255,10 @@ void emu_machine_init(int raster_skip_enabled, int raster_skip2_enabled) {
 
   // If raster skip enabled via kernel params, enable lines.
   set_raster_lines(raster_skip_enabled, raster_skip2_enabled);
+}
+
+int emu_set_sound_sample_rate(int sample_rate) {
+  return resources_set_int("SoundSampleRate", sample_rate);
 }
 
 static int user_pos_keymap_is(const char *expected) {
@@ -362,6 +413,8 @@ int emux_load_state(char *filename) {
 
   // This makes sure sid options are sane.
   check_sid_options();
+  sync_sid_menu_items();
+  sync_sound_menu_items();
 
   int tmp;
   resources_get_int("UserportDevice", &tmp);
@@ -372,17 +425,6 @@ int emux_load_state(char *filename) {
      if (adapter_type_item->choice_ints[i] == tmp) {
          adapter_type_item->value = i;
          break;
-     }
-  }
-
-  resources_get_int("SidStereo", &tmp);
-  sid_dual_item->value = tmp;
-
-  resources_get_int("Sid2AddressStart", &tmp);
-  for (int i=0;i<sid_base_address_item->num_choices;i=i+1) {
-     if (sid_base_address_item->choice_ints[i] == tmp) {
-        sid_base_address_item->value = i;
-        break;
      }
   }
 
@@ -860,9 +902,59 @@ static int viceSidModelToBmcChoice(int viceModel) {
     return MENU_SID_MODEL_6581;
   case SID_MODEL_8580:
     return MENU_SID_MODEL_8580;
+  case SID_MODEL_8580D:
+    return MENU_SID_MODEL_8580_DIGIBOOST;
   default:
     return MENU_SID_MODEL_6581;
   }
+}
+
+static int resource_int_or_default(const char *name, int fallback);
+
+static void configure_sid_model_choices(struct menu_item *item) {
+  item->num_choices = 3;
+  strcpy(item->choices[MENU_SID_MODEL_6581], "6581");
+  strcpy(item->choices[MENU_SID_MODEL_8580], "8580");
+  strcpy(item->choices[MENU_SID_MODEL_8580_DIGIBOOST],
+         "8580 + Digi Boost");
+  item->choice_ints[MENU_SID_MODEL_6581] = SID_MODEL_6581;
+  item->choice_ints[MENU_SID_MODEL_8580] = SID_MODEL_8580;
+  item->choice_ints[MENU_SID_MODEL_8580_DIGIBOOST] = SID_MODEL_8580D;
+}
+
+static int sid2FiltersToBmcChoice(int value) {
+  switch (value) {
+    case SID2_FILTERS_ON:
+      return MENU_SID2_FILTER_ON;
+    case SID2_FILTERS_OFF:
+      return MENU_SID2_FILTER_OFF;
+    case SID2_FILTERS_SAME_AS_SID1:
+    default:
+      return MENU_SID2_FILTER_SAME_AS_SID1;
+  }
+}
+
+static void configure_sid2_filter_choices(struct menu_item *item,
+                                          int show_effective_state) {
+  int sid1_enabled = resource_int_or_default("SidFilters", 1);
+  int value = resource_int_or_default("Sid2Filters",
+                                      SID2_FILTERS_SAME_AS_SID1);
+
+  item->num_choices = 3;
+  if (show_effective_state && value == SID2_FILTERS_SAME_AS_SID1) {
+    snprintf(item->choices[MENU_SID2_FILTER_SAME_AS_SID1],
+             sizeof(item->choices[MENU_SID2_FILTER_SAME_AS_SID1]),
+             "Same as SID1 (%s)", sid1_enabled ? "On" : "Off");
+  } else {
+    strcpy(item->choices[MENU_SID2_FILTER_SAME_AS_SID1], "Same as SID1");
+  }
+  strcpy(item->choices[MENU_SID2_FILTER_ON], "On");
+  strcpy(item->choices[MENU_SID2_FILTER_OFF], "Off");
+  item->choice_ints[MENU_SID2_FILTER_SAME_AS_SID1] =
+      SID2_FILTERS_SAME_AS_SID1;
+  item->choice_ints[MENU_SID2_FILTER_ON] = SID2_FILTERS_ON;
+  item->choice_ints[MENU_SID2_FILTER_OFF] = SID2_FILTERS_OFF;
+  item->value = sid2FiltersToBmcChoice(value);
 }
 
 static int viceSidResamplingToBmcChoice(int method) {
@@ -880,7 +972,240 @@ static int viceSidResamplingToBmcChoice(int method) {
   }
 }
 
+static int resource_int_or_default(const char *name, int fallback) {
+  int value = fallback;
+  resources_get_int(name, &value);
+  return value;
+}
+
+static struct menu_item *add_resource_toggle(int id,
+                                             struct menu_item *parent,
+                                             const char *label,
+                                             const char *resource) {
+  return ui_menu_add_toggle(id, parent, (char *)label,
+                            resource_int_or_default(resource, 0));
+}
+
+static struct menu_item *add_resid_range(int id,
+                                         struct menu_item *parent,
+                                         const char *label,
+                                         const char *resource,
+                                         int min, int max, int step,
+                                         int fallback) {
+  return ui_menu_add_range(id, parent, (char *)label, min, max, step,
+                           resource_int_or_default(resource, fallback));
+}
+
+static void add_sid_resid_settings_menu(struct menu_item *sid_parent,
+                                        int chipno) {
+  struct sid_resid_menu_items *items = &sid_resid_items[chipno];
+  int sid2 = chipno == 1;
+  struct menu_item *model_parent;
+
+  items->settings = ui_menu_add_folder(sid_parent, "reSID Filter Settings");
+
+  model_parent = ui_menu_add_folder(items->settings, "6581");
+  items->passband_6581 = add_resid_range(
+      sid2 ? MENU_SID2_RESID_6581_PASSBAND : MENU_SID_RESID_6581_PASSBAND,
+      model_parent, "Passband %",
+      sid2 ? "Sid2ResidPassband" : "SidResidPassband",
+      RESID_6581_PASSBAND_MIN, RESID_6581_PASSBAND_MAX, 1,
+      RESID_6581_PASSBAND_DEFAULT);
+  items->gain_6581 = add_resid_range(
+      sid2 ? MENU_SID2_RESID_6581_GAIN : MENU_SID_RESID_6581_GAIN,
+      model_parent, "Gain %", sid2 ? "Sid2ResidGain" : "SidResidGain",
+      RESID_6581_FILTER_GAIN_MIN, RESID_6581_FILTER_GAIN_MAX, 1,
+      RESID_6581_FILTER_GAIN_DEFAULT);
+  items->bias_6581 = add_resid_range(
+      sid2 ? MENU_SID2_RESID_6581_FILTER_BIAS
+           : MENU_SID_RESID_6581_FILTER_BIAS,
+      model_parent, "Filter Bias (mV)",
+      sid2 ? "Sid2ResidFilterBias" : "SidResidFilterBias",
+      RESID_6581_FILTER_BIAS_MIN, RESID_6581_FILTER_BIAS_MAX, 100,
+      RESID_6581_FILTER_BIAS_DEFAULT);
+  items->bias_6581->ministep = 10;
+  items->bias_6581->divisor = RESID_6581_FILTER_BIAS_ONE;
+
+  model_parent = ui_menu_add_folder(items->settings, "8580");
+  items->passband_8580 = add_resid_range(
+      sid2 ? MENU_SID2_RESID_8580_PASSBAND : MENU_SID_RESID_8580_PASSBAND,
+      model_parent, "Passband %",
+      sid2 ? "Sid2Resid8580Passband" : "SidResid8580Passband",
+      RESID_8580_PASSBAND_MIN, RESID_8580_PASSBAND_MAX, 1,
+      RESID_8580_PASSBAND_DEFAULT);
+  items->gain_8580 = add_resid_range(
+      sid2 ? MENU_SID2_RESID_8580_GAIN : MENU_SID_RESID_8580_GAIN,
+      model_parent, "Gain %",
+      sid2 ? "Sid2Resid8580Gain" : "SidResid8580Gain",
+      RESID_8580_FILTER_GAIN_MIN, RESID_8580_FILTER_GAIN_MAX, 1,
+      RESID_8580_FILTER_GAIN_DEFAULT);
+  items->bias_8580 = add_resid_range(
+      sid2 ? MENU_SID2_RESID_8580_FILTER_BIAS
+           : MENU_SID_RESID_8580_FILTER_BIAS,
+      model_parent, "Filter Bias (mV)",
+      sid2 ? "Sid2Resid8580FilterBias" : "SidResid8580FilterBias",
+      RESID_8580_FILTER_BIAS_MIN, RESID_8580_FILTER_BIAS_MAX, 100,
+      RESID_8580_FILTER_BIAS_DEFAULT);
+  items->bias_8580->ministep = 10;
+  items->bias_8580->divisor = RESID_8580_FILTER_BIAS_ONE;
+}
+
+static void sync_sid_resid_menu_items(int chipno, int engine) {
+  struct sid_resid_menu_items *items = &sid_resid_items[chipno];
+  int sid2 = chipno == 1;
+  int inherit_sid1;
+  int disabled;
+
+  if (items->settings == NULL) {
+    return;
+  }
+
+  inherit_sid1 = sid2 &&
+                 resource_int_or_default("Sid2Filters",
+                                         SID2_FILTERS_SAME_AS_SID1) ==
+                     SID2_FILTERS_SAME_AS_SID1;
+  disabled = engine != SID_ENGINE_RESID || inherit_sid1;
+  items->settings->disabled = engine != SID_ENGINE_RESID;
+  items->passband_6581->disabled = disabled;
+  items->gain_6581->disabled = disabled;
+  items->bias_6581->disabled = disabled;
+  items->passband_8580->disabled = disabled;
+  items->gain_8580->disabled = disabled;
+  items->bias_8580->disabled = disabled;
+  items->passband_6581->value = resource_int_or_default(
+      sid2 && !inherit_sid1 ? "Sid2ResidPassband" : "SidResidPassband",
+      RESID_6581_PASSBAND_DEFAULT);
+  items->gain_6581->value = resource_int_or_default(
+      sid2 && !inherit_sid1 ? "Sid2ResidGain" : "SidResidGain",
+      RESID_6581_FILTER_GAIN_DEFAULT);
+  items->bias_6581->value = resource_int_or_default(
+      sid2 && !inherit_sid1 ? "Sid2ResidFilterBias" : "SidResidFilterBias",
+      RESID_6581_FILTER_BIAS_DEFAULT);
+  items->passband_8580->value = resource_int_or_default(
+      sid2 && !inherit_sid1 ? "Sid2Resid8580Passband"
+                            : "SidResid8580Passband",
+      RESID_8580_PASSBAND_DEFAULT);
+  items->gain_8580->value = resource_int_or_default(
+      sid2 && !inherit_sid1 ? "Sid2Resid8580Gain" : "SidResid8580Gain",
+      RESID_8580_FILTER_GAIN_DEFAULT);
+  items->bias_8580->value = resource_int_or_default(
+      sid2 && !inherit_sid1 ? "Sid2Resid8580FilterBias"
+                            : "SidResid8580FilterBias",
+      RESID_8580_FILTER_BIAS_DEFAULT);
+}
+
+static void sync_sid_menu_items(void) {
+  int engine = resource_int_or_default("SidEngine", SID_ENGINE_RESID);
+  int value;
+
+  if (sid_engine_item != NULL) {
+    sid_engine_item->value = viceSidEngineToBmcChoice(engine);
+  }
+  if (sid_model_item != NULL) {
+    value = resource_int_or_default("SidModel", SID_MODEL_6581);
+    sid_model_item->value = viceSidModelToBmcChoice(value);
+    sid_model_item->choice_disabled[MENU_SID_MODEL_8580_DIGIBOOST] =
+        engine != SID_ENGINE_RESID;
+  }
+  if (sid_model2_item != NULL) {
+    value = resource_int_or_default("Sid2Model", SID_MODEL_6581);
+    sid_model2_item->value = viceSidModelToBmcChoice(value);
+    sid_model2_item->choice_disabled[MENU_SID_MODEL_8580_DIGIBOOST] =
+        engine != SID_ENGINE_RESID;
+  }
+  if (sid_filter_item != NULL) {
+    sid_filter_item->value = resource_int_or_default("SidFilters", 1);
+  }
+  if (sid_filter2_item != NULL) {
+    configure_sid2_filter_choices(sid_filter2_item, 0);
+  }
+  if (sid_resampling_item != NULL) {
+    value = resource_int_or_default("SidResidSampling",
+                                    SID_RESID_SAMPLING_FAST);
+    sid_resampling_item->value = viceSidResamplingToBmcChoice(value);
+    sid_resampling_item->disabled = engine != SID_ENGINE_RESID;
+  }
+  sync_sid_resid_menu_items(0, engine);
+  sync_sid_resid_menu_items(1, engine);
+
+  if (sid_dual_item != NULL) {
+    value = resource_int_or_default("SidStereo", 0);
+    sid_dual_item->value = value > 0;
+  }
+  if (sid_base_address_item != NULL) {
+    int address = resource_int_or_default("Sid2AddressStart", 0xde00);
+    for (int i = 0; i < sid_base_address_item->num_choices; ++i) {
+      if (sid_base_address_item->choice_ints[i] == address) {
+        sid_base_address_item->value = i;
+        break;
+      }
+    }
+  }
+}
+
+static void sync_sound_menu_items(void) {
+  if (sound_emulation_item != NULL) {
+    sound_emulation_item->value = resource_int_or_default("Sound", 1);
+  }
+  if (sound_warp_item != NULL) {
+    sound_warp_item->value =
+        resource_int_or_default("SoundEmulateOnWarp", 0);
+  }
+  if (datasette_sound_item != NULL) {
+    datasette_sound_item->value =
+        resource_int_or_default("DatasetteSound", 0);
+  }
+  if (datasette_sound_volume_item != NULL) {
+    int raw_volume = resource_int_or_default("DatasetteSoundVolume",
+                                             TAPE_SOUND_VOLUME_DEFAULT);
+    datasette_sound_volume_item->value =
+        (raw_volume * 100 + TAPE_SOUND_VOLUME_ONE / 2) /
+        TAPE_SOUND_VOLUME_ONE;
+  }
+  if (audio_leak_vicii_item != NULL) {
+    audio_leak_vicii_item->value =
+        resource_int_or_default("VICIIAudioLeak", 0);
+  }
+  if (audio_leak_vdc_item != NULL) {
+    audio_leak_vdc_item->value =
+        resource_int_or_default("VDCAudioLeak", 0);
+  }
+  if (audio_leak_vic_item != NULL) {
+    audio_leak_vic_item->value =
+        resource_int_or_default("VICAudioLeak", 0);
+  }
+  if (audio_leak_ted_item != NULL) {
+    audio_leak_ted_item->value =
+        resource_int_or_default("TEDAudioLeak", 0);
+  }
+  if (audio_leak_crtc_item != NULL) {
+    audio_leak_crtc_item->value =
+        resource_int_or_default("CrtcAudioLeak", 0);
+  }
+}
+
 void emux_add_tape_options(struct menu_item* parent) {
+  datasette_sound_item = NULL;
+  datasette_sound_volume_item = NULL;
+
+  int datasette_sound;
+  if (resources_get_int("DatasetteSound", &datasette_sound) != 0) {
+    return;
+  }
+
+  struct menu_item *datasette_parent =
+      ui_menu_add_folder(parent, "Datasette Sound");
+  datasette_sound_item = ui_menu_add_toggle(
+      MENU_DATASETTE_SOUND, datasette_parent, "Enabled", datasette_sound);
+  int raw_volume = resource_int_or_default("DatasetteSoundVolume",
+                                           TAPE_SOUND_VOLUME_DEFAULT);
+  int volume_percent =
+      (raw_volume * 100 + TAPE_SOUND_VOLUME_ONE / 2) /
+      TAPE_SOUND_VOLUME_ONE;
+  datasette_sound_volume_item = ui_menu_add_range(
+      MENU_DATASETTE_SOUND_VOLUME, datasette_parent, "Volume %", 0,
+      TAPE_SOUND_VOLUME_MAX * 100 / TAPE_SOUND_VOLUME_ONE, 5,
+      volume_percent);
 }
 
 void emux_add_keyboard_options(struct menu_item* parent) {
@@ -907,10 +1232,11 @@ void emux_add_keyboard_options(struct menu_item* parent) {
   }
 }
 
-// NOTES: 0xd400 is normally not an option in VICE for the 2nd SID but
-// we added mirroring support for BMC64. Also, each sid can be configured
-// to have different models unlike upstream VICE.
-void emux_add_sound_options(struct menu_item* parent) {
+// NOTE: 0xd400 is normally not an option in VICE for the 2nd SID, but
+// BMC64 adds mirroring support for it.
+void emux_add_sound_options(struct menu_item* emulation_parent,
+                            struct menu_item* sid_parent,
+                            struct menu_item* sound_parent) {
 
   static int addresses[] = {
       0xd400, 0xd420, 0xd440, 0xd460, 0xd480, 0xd4a0, 0xd4c0, 0xd4d0,
@@ -921,6 +1247,29 @@ void emux_add_sound_options(struct menu_item* parent) {
       0xdf00, 0xdf20, 0xdf40, 0xdf60, 0xdf80, 0xdfa0, 0xdfc0, 0xdfd0,
   };
 
+  sid_dual_item = NULL;
+  sid_base_address_item = NULL;
+  sid_engine_item = NULL;
+  sid_model_item = NULL;
+  sid_model2_item = NULL;
+  sid_filter_item = NULL;
+  sid_filter2_item = NULL;
+  sid_resampling_item = NULL;
+  memset(sid_resid_items, 0, sizeof(sid_resid_items));
+  sound_emulation_item = NULL;
+  sound_warp_item = NULL;
+  audio_leak_vicii_item = NULL;
+  audio_leak_vdc_item = NULL;
+  audio_leak_vic_item = NULL;
+  audio_leak_ted_item = NULL;
+  audio_leak_crtc_item = NULL;
+
+  sound_emulation_item = add_resource_toggle(
+      MENU_SOUND_EMULATION, emulation_parent, "Sound Emulation", "Sound");
+  sound_warp_item = add_resource_toggle(
+      MENU_SOUND_WARP_MODE, emulation_parent, "Sound in Warp Mode",
+      "SoundEmulateOnWarp");
+
   check_sid_options();
 
   // The pet has terrible lag when using ReSid, use FAST since it only
@@ -929,118 +1278,121 @@ void emux_add_sound_options(struct menu_item* parent) {
      resources_set_int("SidEngine", SID_ENGINE_FASTSID);
      resources_set_int("SidModel", SID_MODEL_6581);
      resources_set_int("SidFilters", 0);
-     return;
-  }
+     sid_parent->disabled = 1;
+  } else {
+    int supports_dual_sid = machine_supports_dual_sid();
+    struct menu_item* child = sid_engine_item =
+        ui_menu_add_multiple_choice(MENU_SID_ENGINE, sid_parent, "Engine");
+    child->num_choices = 2;
+    strcpy(child->choices[MENU_SID_ENGINE_FAST], "FastSID");
+    strcpy(child->choices[MENU_SID_ENGINE_RESID], "reSID");
+    child->choice_ints[MENU_SID_ENGINE_FAST] = SID_ENGINE_FASTSID;
+    child->choice_ints[MENU_SID_ENGINE_RESID] = SID_ENGINE_RESID;
 
-  int supports_dual_sid = (machine_class == VICE_MACHINE_C64 ||
-                           machine_class == VICE_MACHINE_C64SC ||
-                           machine_class == VICE_MACHINE_SCPU64 ||
-                           machine_class == VICE_MACHINE_C128) &&
-                          circle_get_model() >= 2;
+    if (circle_get_model() >= 3) {
+      child = sid_resampling_item =
+          ui_menu_add_multiple_choice(MENU_SID_SAMPLING, sid_parent,
+                                      "Sampling");
+      child->num_choices = 4;
+      strcpy(child->choices[MENU_SID_SAMPLING_FAST], "Fast");
+      strcpy(child->choices[MENU_SID_SAMPLING_INTERPOLATION],
+             "Interpolation");
+      strcpy(child->choices[MENU_SID_SAMPLING_RESAMPLING], "Resampling");
+      strcpy(child->choices[MENU_SID_SAMPLING_FAST_RESAMPLING],
+             "Fast Resampling");
+      child->choice_ints[MENU_SID_SAMPLING_FAST] = SID_RESID_SAMPLING_FAST;
+      child->choice_ints[MENU_SID_SAMPLING_INTERPOLATION] =
+          SID_RESID_SAMPLING_INTERPOLATION;
+      child->choice_ints[MENU_SID_SAMPLING_RESAMPLING] =
+          SID_RESID_SAMPLING_RESAMPLING;
+      child->choice_ints[MENU_SID_SAMPLING_FAST_RESAMPLING] =
+          SID_RESID_SAMPLING_FAST_RESAMPLING;
 
-  // Resid by default
-  struct menu_item* child = sid_engine_item =
-      ui_menu_add_multiple_choice(MENU_SID_ENGINE, parent, "SID Engine");
-  child->num_choices = 2;
-  child->value = MENU_SID_ENGINE_RESID;
-  strcpy(child->choices[MENU_SID_ENGINE_FAST], "Fast");
-  strcpy(child->choices[MENU_SID_ENGINE_RESID], "ReSid");
-  child->choice_ints[MENU_SID_ENGINE_FAST] = SID_ENGINE_FASTSID;
-  child->choice_ints[MENU_SID_ENGINE_RESID] = SID_ENGINE_RESID;
-
-  // 6581 by default
-  child = sid_model_item[0] =
-    ui_menu_add_multiple_choice(MENU_SID_MODEL, parent, "SID Model");
-  child->num_choices = 2;
-  child->value = MENU_SID_MODEL_6581;
-  strcpy(child->choices[MENU_SID_MODEL_6581], "6581");
-  strcpy(child->choices[MENU_SID_MODEL_8580], "8580");
-  child->choice_ints[MENU_SID_MODEL_6581] = SID_MODEL_6581;
-  child->choice_ints[MENU_SID_MODEL_8580] = SID_MODEL_8580;
-
-  // Filter on by default
-  sid_filter_item =
-      ui_menu_add_toggle(MENU_SID_FILTER, parent, "SID Filter", 0);
-
-  if (circle_get_model() >= 3) {
-     child = sid_resampling_item =
-         ui_menu_add_multiple_choice(MENU_SID_SAMPLING,
-             parent, "SID Resampling");
-     child->num_choices = 4;
-     strcpy(child->choices[MENU_SID_SAMPLING_FAST], "Fast");
-     strcpy(child->choices[MENU_SID_SAMPLING_INTERPOLATION], "Interpolation");
-     strcpy(child->choices[MENU_SID_SAMPLING_RESAMPLING], "Resampling");
-     strcpy(child->choices[MENU_SID_SAMPLING_FAST_RESAMPLING], "Fast Resampling");
-     child->choice_ints[MENU_SID_SAMPLING_FAST] =
-         SID_RESID_SAMPLING_FAST;
-     child->choice_ints[MENU_SID_SAMPLING_INTERPOLATION] =
-         SID_RESID_SAMPLING_INTERPOLATION;
-     child->choice_ints[MENU_SID_SAMPLING_RESAMPLING] =
-         SID_RESID_SAMPLING_RESAMPLING;
-     child->choice_ints[MENU_SID_SAMPLING_FAST_RESAMPLING] =
-         SID_RESID_SAMPLING_FAST_RESAMPLING;
-
-     if (circle_get_model() < 4) {
+      if (circle_get_model() < 4) {
         child->choice_disabled[MENU_SID_SAMPLING_RESAMPLING] = 1;
-     }
-  }
+      }
+    }
 
-  if (supports_dual_sid) {
-     ui_menu_add_divider(parent);
+    struct menu_item *sid1_parent = ui_menu_add_folder(sid_parent, "SID1");
+    child = sid_model_item =
+        ui_menu_add_multiple_choice(MENU_SID_MODEL, sid1_parent, "Model");
+    configure_sid_model_choices(child);
+    sid_filter_item = add_resource_toggle(MENU_SID_FILTER, sid1_parent,
+                                          "Filter", "SidFilters");
+    add_sid_resid_settings_menu(sid1_parent, 0);
 
-     int value;
-     resources_get_int("SidStereo", &value);
-     if (value > 1) {
+    if (supports_dual_sid) {
+      struct menu_item *sid2_parent = ui_menu_add_folder(sid_parent, "SID2");
+      int value = resource_int_or_default("SidStereo", 0);
+
+      sid2_filter_settings_ensure_initialized();
+      if (value > 1) {
         resources_set_int("SidStereo", 1);
         value = 1;
-     }
-     sid_dual_item =
-        ui_menu_add_toggle(MENU_SID2_ENABLE, parent, "Dual SID", value);
+      }
+      sid_dual_item = ui_menu_add_toggle(MENU_SID2_ENABLE, sid2_parent,
+                                         "Enabled", value);
 
-     child = sid_base_address_item =
-        ui_menu_add_multiple_choice(MENU_SID2_ADDRESS, parent, "SID2 Address");
-     child->num_choices = 48;
-
-     int cur_addr;
-     resources_get_int("Sid2AddressStart", &cur_addr);
-     for (int i=0;i<48;i=i+1) {
-        char label[32];
-        sprintf (label, "0x%04x", addresses[i]);
-        strcpy(child->choices[i], label);
+      child = sid_base_address_item = ui_menu_add_multiple_choice(
+          MENU_SID2_ADDRESS, sid2_parent, "Address");
+      child->num_choices = 48;
+      for (int i = 0; i < 48; ++i) {
+        sprintf(child->choices[i], "0x%04x", addresses[i]);
         child->choice_ints[i] = addresses[i];
-        if (addresses[i] == cur_addr) {
-           child->value = i;
-        }
-     }
+      }
 
-     // 6581 by default
-     child = sid_model_item[1] =
-       ui_menu_add_multiple_choice(MENU_SID2_MODEL, parent, "SID2 Model");
-     child->num_choices = 2;
-     child->value = MENU_SID_MODEL_6581;
-     strcpy(child->choices[MENU_SID_MODEL_6581], "6581");
-     strcpy(child->choices[MENU_SID_MODEL_8580], "8580");
-     child->choice_ints[MENU_SID_MODEL_6581] = SID_MODEL_6581;
-     child->choice_ints[MENU_SID_MODEL_8580] = SID_MODEL_8580;
+      child = sid_model2_item = ui_menu_add_multiple_choice(
+          MENU_SID2_MODEL, sid2_parent, "Model");
+      configure_sid_model_choices(child);
+
+      child = sid_filter2_item =
+          ui_menu_add_multiple_choice(MENU_SID2_FILTER, sid2_parent, "Filter");
+      configure_sid2_filter_choices(child, 0);
+      add_sid_resid_settings_menu(sid2_parent, 1);
+    }
+
+    sync_sid_menu_items();
   }
 
-  int tmp_value;
-
-  resources_get_int("SidEngine", &tmp_value);
-  sid_engine_item->value = viceSidEngineToBmcChoice(tmp_value);
-
-  resources_get_int("SidModel", &tmp_value);
-  sid_model_item[0]->value = viceSidModelToBmcChoice(tmp_value);
-  resources_get_int("SidModel", &tmp_value);
-  sid_model_item[1]->value = viceSidModelToBmcChoice(tmp_value);
-
-  resources_get_int("SidFilters", &tmp_value);
-  sid_filter_item->value = tmp_value;
-
-  if (circle_get_model() >= 3 ) {
-    resources_get_int("SidResidSampling", &tmp_value);
-    sid_resampling_item->value =
-        viceSidResamplingToBmcChoice(tmp_value);
+  struct menu_item *analog_parent = NULL;
+  switch (machine_class) {
+    case VICE_MACHINE_C64:
+    case VICE_MACHINE_C64SC:
+    case VICE_MACHINE_SCPU64:
+      analog_parent = ui_menu_add_folder(sound_parent, "Analog Effects");
+      audio_leak_vicii_item = add_resource_toggle(
+          MENU_AUDIO_LEAK_VICII, analog_parent, "VIC-II Audio Leak",
+          "VICIIAudioLeak");
+      break;
+    case VICE_MACHINE_C128:
+      analog_parent = ui_menu_add_folder(sound_parent, "Analog Effects");
+      audio_leak_vicii_item = add_resource_toggle(
+          MENU_AUDIO_LEAK_VICII, analog_parent, "VIC-II Audio Leak",
+          "VICIIAudioLeak");
+      audio_leak_vdc_item = add_resource_toggle(
+          MENU_AUDIO_LEAK_VDC, analog_parent, "VDC Audio Leak",
+          "VDCAudioLeak");
+      break;
+    case VICE_MACHINE_VIC20:
+      analog_parent = ui_menu_add_folder(sound_parent, "Analog Effects");
+      audio_leak_vic_item = add_resource_toggle(
+          MENU_AUDIO_LEAK_VIC, analog_parent, "VIC Audio Leak",
+          "VICAudioLeak");
+      break;
+    case VICE_MACHINE_PLUS4:
+      analog_parent = ui_menu_add_folder(sound_parent, "Analog Effects");
+      audio_leak_ted_item = add_resource_toggle(
+          MENU_AUDIO_LEAK_TED, analog_parent, "TED Audio Leak",
+          "TEDAudioLeak");
+      break;
+    case VICE_MACHINE_PET:
+      analog_parent = ui_menu_add_folder(sound_parent, "Analog Effects");
+      audio_leak_crtc_item = add_resource_toggle(
+          MENU_AUDIO_LEAK_CRTC, analog_parent, "CRTC Audio Leak",
+          "CrtcAudioLeak");
+      break;
+    default:
+      break;
   }
 }
 
@@ -1120,7 +1472,8 @@ void emux_set_int(IntSetting setting, int value) {
      resources_set_int("DriveSoundEmulation", value);
      break;
    case Setting_DriveSoundEmulationVolume:
-     resources_set_int("DriveSoundEmulationVolume", value);
+     resources_set_int("DriveSoundEmulationVolume",
+                       (value * DRIVE_SOUND_VOLUME_ONE + 50) / 100);
      break;
    case Setting_Mouse:
      resources_set_int("Mouse", value);
@@ -1163,6 +1516,8 @@ void emux_set_int_1(IntSetting setting, int value, int param) {
      resources_set_int_sprintf("Drive%iType", value, param);
      break;
    case Setting_IECDeviceN:
+     resources_set_int_sprintf("BusDevice%i", value, param);
+     /* Keep the VICE 3.3-era config alias synchronized. */
      resources_set_int_sprintf("IECDevice%i", value, param);
      break;
    case Setting_DriveNCMDHDMode:
@@ -1181,9 +1536,13 @@ void emux_get_int(IntSetting setting, int* dest) {
     case Setting_DriveSoundEmulation:
       resources_get_int("DriveSoundEmulation", dest);
       break;
-    case Setting_DriveSoundEmulationVolume:
-      resources_get_int("DriveSoundEmulationVolume", dest);
+    case Setting_DriveSoundEmulationVolume: {
+      int raw_volume = DRIVE_SOUND_VOLUME_DEFAULT;
+      resources_get_int("DriveSoundEmulationVolume", &raw_volume);
+      *dest = (raw_volume * 100 + DRIVE_SOUND_VOLUME_ONE / 2) /
+              DRIVE_SOUND_VOLUME_ONE;
       break;
+    }
     case Setting_C128ColumnKey:
       resources_get_int("C128ColumnKey", dest);
       break;
@@ -1210,7 +1569,7 @@ void emux_get_int_1(IntSetting setting, int* dest, int param) {
       resources_get_int_sprintf("Drive%iType", dest, param);
       break;
     case Setting_IECDeviceN:
-      resources_get_int_sprintf("IECDevice%i", dest, param);
+      resources_get_int_sprintf("BusDevice%i", dest, param);
       break;
     default:
       assert(0);
@@ -1235,10 +1594,12 @@ int emux_handle_menu_change(struct menu_item* item) {
   switch (item->id) {
     case MENU_SID2_ADDRESS:
       resources_set_int("Sid2AddressStart", item->choice_ints[item->value]);
+      sync_sid_menu_items();
       return 1;
     case MENU_SID2_ENABLE:
       resources_set_int("SidStereo", item->value);
       check_sid_options();
+      sync_sid_menu_items();
       return 1;
     case MENU_SID_ENGINE:
     {
@@ -1251,6 +1612,7 @@ int emux_handle_menu_change(struct menu_item* item) {
       status = resources_set_int("SidEngine", requested);
       resources_get_int("SidEngine", &after);
       check_sid_options();
+      sync_sid_menu_items();
       if (status == 0 && after != before) {
         reopen_sound_after_sid_menu_change();
       }
@@ -1259,17 +1621,111 @@ int emux_handle_menu_change(struct menu_item* item) {
     case MENU_SID_MODEL:
       resources_set_int("SidModel", item->choice_ints[item->value]);
       check_sid_options();
+      sync_sid_menu_items();
       return 1;
     case MENU_SID2_MODEL:
-      resources_set_int("SidModel", item->choice_ints[item->value]);
+      resources_set_int("Sid2Model", item->choice_ints[item->value]);
       check_sid_options();
+      sync_sid_menu_items();
+      return 1;
+    case MENU_SID2_FILTER:
+      resources_set_int("Sid2Filters", item->choice_ints[item->value]);
+      sync_sid_menu_items();
       return 1;
     case MENU_SID_FILTER:
       resources_set_int("SidFilters", item->value);
       check_sid_options();
+      sync_sid_menu_items();
       return 1;
     case MENU_SID_SAMPLING:
-      resources_set_int("SidResidSampling", item->value);
+      resources_set_int("SidResidSampling",
+                        item->choice_ints[item->value]);
+      sync_sid_menu_items();
+      return 1;
+    case MENU_SID_RESID_6581_PASSBAND:
+      resources_set_int("SidResidPassband", item->value);
+      sync_sid_menu_items();
+      return 1;
+    case MENU_SID_RESID_6581_GAIN:
+      resources_set_int("SidResidGain", item->value);
+      sync_sid_menu_items();
+      return 1;
+    case MENU_SID_RESID_6581_FILTER_BIAS:
+      resources_set_int("SidResidFilterBias", item->value);
+      sync_sid_menu_items();
+      return 1;
+    case MENU_SID_RESID_8580_PASSBAND:
+      resources_set_int("SidResid8580Passband", item->value);
+      sync_sid_menu_items();
+      return 1;
+    case MENU_SID_RESID_8580_GAIN:
+      resources_set_int("SidResid8580Gain", item->value);
+      sync_sid_menu_items();
+      return 1;
+    case MENU_SID_RESID_8580_FILTER_BIAS:
+      resources_set_int("SidResid8580FilterBias", item->value);
+      sync_sid_menu_items();
+      return 1;
+    case MENU_SID2_RESID_6581_PASSBAND:
+      resources_set_int("Sid2ResidPassband", item->value);
+      sync_sid_menu_items();
+      return 1;
+    case MENU_SID2_RESID_6581_GAIN:
+      resources_set_int("Sid2ResidGain", item->value);
+      sync_sid_menu_items();
+      return 1;
+    case MENU_SID2_RESID_6581_FILTER_BIAS:
+      resources_set_int("Sid2ResidFilterBias", item->value);
+      sync_sid_menu_items();
+      return 1;
+    case MENU_SID2_RESID_8580_PASSBAND:
+      resources_set_int("Sid2Resid8580Passband", item->value);
+      sync_sid_menu_items();
+      return 1;
+    case MENU_SID2_RESID_8580_GAIN:
+      resources_set_int("Sid2Resid8580Gain", item->value);
+      sync_sid_menu_items();
+      return 1;
+    case MENU_SID2_RESID_8580_FILTER_BIAS:
+      resources_set_int("Sid2Resid8580FilterBias", item->value);
+      sync_sid_menu_items();
+      return 1;
+    case MENU_SOUND_EMULATION:
+      resources_set_int("Sound", item->value);
+      sync_sound_menu_items();
+      return 1;
+    case MENU_SOUND_WARP_MODE:
+      resources_set_int("SoundEmulateOnWarp", item->value);
+      sync_sound_menu_items();
+      return 1;
+    case MENU_DATASETTE_SOUND:
+      resources_set_int("DatasetteSound", item->value);
+      sync_sound_menu_items();
+      return 1;
+    case MENU_DATASETTE_SOUND_VOLUME:
+      resources_set_int("DatasetteSoundVolume",
+                        (item->value * TAPE_SOUND_VOLUME_ONE + 50) / 100);
+      sync_sound_menu_items();
+      return 1;
+    case MENU_AUDIO_LEAK_VICII:
+      resources_set_int("VICIIAudioLeak", item->value);
+      sync_sound_menu_items();
+      return 1;
+    case MENU_AUDIO_LEAK_VDC:
+      resources_set_int("VDCAudioLeak", item->value);
+      sync_sound_menu_items();
+      return 1;
+    case MENU_AUDIO_LEAK_VIC:
+      resources_set_int("VICAudioLeak", item->value);
+      sync_sound_menu_items();
+      return 1;
+    case MENU_AUDIO_LEAK_TED:
+      resources_set_int("TEDAudioLeak", item->value);
+      sync_sound_menu_items();
+      return 1;
+    case MENU_AUDIO_LEAK_CRTC:
+      resources_set_int("CrtcAudioLeak", item->value);
+      sync_sound_menu_items();
       return 1;
     case MENU_SAVE_EASYFLASH:
       if (cartridge_flush_image(CARTRIDGE_EASYFLASH) < 0) {
@@ -1333,11 +1789,211 @@ int emux_handle_menu_change(struct menu_item* item) {
   return 0;
 }
 
+static int sid_filter_model_uses_8580(int model) {
+  return model == SID_MODEL_8580 || model == SID_MODEL_8580D;
+}
+
+static const char *sid_filter_osd_resource(int chipno, int model, int range) {
+  int sid2 = chipno == 1;
+  int use_8580 = sid_filter_model_uses_8580(model);
+
+  switch (range) {
+    case SID_FILTER_OSD_PASSBAND:
+      if (sid2) {
+        return use_8580 ? "Sid2Resid8580Passband" : "Sid2ResidPassband";
+      }
+      return use_8580 ? "SidResid8580Passband" : "SidResidPassband";
+    case SID_FILTER_OSD_GAIN:
+      if (sid2) {
+        return use_8580 ? "Sid2Resid8580Gain" : "Sid2ResidGain";
+      }
+      return use_8580 ? "SidResid8580Gain" : "SidResidGain";
+    case SID_FILTER_OSD_BIAS:
+    default:
+      if (sid2) {
+        return use_8580 ? "Sid2Resid8580FilterBias"
+                        : "Sid2ResidFilterBias";
+      }
+      return use_8580 ? "SidResid8580FilterBias" : "SidResidFilterBias";
+  }
+}
+
+static int sid_filter_osd_default(int model, int range) {
+  int use_8580 = sid_filter_model_uses_8580(model);
+
+  switch (range) {
+    case SID_FILTER_OSD_PASSBAND:
+      return use_8580 ? RESID_8580_PASSBAND_DEFAULT
+                      : RESID_6581_PASSBAND_DEFAULT;
+    case SID_FILTER_OSD_GAIN:
+      return use_8580 ? RESID_8580_FILTER_GAIN_DEFAULT
+                      : RESID_6581_FILTER_GAIN_DEFAULT;
+    case SID_FILTER_OSD_BIAS:
+    default:
+      return use_8580 ? RESID_8580_FILTER_BIAS_DEFAULT
+                      : RESID_6581_FILTER_BIAS_DEFAULT;
+  }
+}
+
+static void sync_sid_filter_osd_items(void) {
+  int inherit_sid1 =
+      resource_int_or_default("Sid2Filters", SID2_FILTERS_SAME_AS_SID1) ==
+      SID2_FILTERS_SAME_AS_SID1;
+
+  if (sid_filter_osd_sid2_item != NULL) {
+    configure_sid2_filter_choices(sid_filter_osd_sid2_item, 1);
+  }
+
+  for (int chipno = 0; chipno < 2; ++chipno) {
+    int source_chip = chipno == 1 && inherit_sid1 ? 0 : chipno;
+    int model = sid_filter_osd_models[chipno];
+
+    for (int range = 0; range < SID_FILTER_OSD_RANGE_COUNT; ++range) {
+      struct menu_item *item = sid_filter_osd_ranges[chipno][range];
+
+      if (item == NULL) {
+        continue;
+      }
+      item->disabled = chipno == 1 && inherit_sid1;
+      item->value = resource_int_or_default(
+          sid_filter_osd_resource(source_chip, model, range),
+          sid_filter_osd_default(model, range));
+    }
+  }
+}
+
+static void sid_filter_osd_item_changed(struct menu_item *item) {
+  emux_handle_menu_change(item);
+  sync_sid_filter_osd_items();
+}
+
+static void sid_filter_osd_popped(struct menu_item *new_root,
+                                  struct menu_item *old_root) {
+  sid_filter_osd_sid2_item = NULL;
+  memset(sid_filter_osd_ranges, 0, sizeof(sid_filter_osd_ranges));
+  glob_osd_popped(new_root, old_root);
+}
+
+static void add_sid_filter_osd_ranges(struct menu_item *root, int chipno,
+                                      int model) {
+  int sid2 = chipno == 1;
+  int use_8580 = sid_filter_model_uses_8580(model);
+  const char *model_name = use_8580 ? "8580" : "6581";
+  char label[40];
+  struct menu_item *child;
+
+  snprintf(label, sizeof(label), "SID%d %s Passband %%", chipno + 1,
+           model_name);
+  child = add_resid_range(
+      sid2 ? (use_8580 ? MENU_SID2_RESID_8580_PASSBAND
+                       : MENU_SID2_RESID_6581_PASSBAND)
+           : (use_8580 ? MENU_SID_RESID_8580_PASSBAND
+                       : MENU_SID_RESID_6581_PASSBAND),
+      root, label, sid_filter_osd_resource(chipno, model,
+                                          SID_FILTER_OSD_PASSBAND),
+      use_8580 ? RESID_8580_PASSBAND_MIN : RESID_6581_PASSBAND_MIN,
+      use_8580 ? RESID_8580_PASSBAND_MAX : RESID_6581_PASSBAND_MAX, 1,
+      use_8580 ? RESID_8580_PASSBAND_DEFAULT : RESID_6581_PASSBAND_DEFAULT);
+  sid_filter_osd_ranges[chipno][SID_FILTER_OSD_PASSBAND] = child;
+  child->on_value_changed = sid_filter_osd_item_changed;
+
+  snprintf(label, sizeof(label), "SID%d %s Gain %%", chipno + 1, model_name);
+  child = add_resid_range(
+      sid2 ? (use_8580 ? MENU_SID2_RESID_8580_GAIN
+                       : MENU_SID2_RESID_6581_GAIN)
+           : (use_8580 ? MENU_SID_RESID_8580_GAIN
+                       : MENU_SID_RESID_6581_GAIN),
+      root, label,
+      sid_filter_osd_resource(chipno, model, SID_FILTER_OSD_GAIN),
+      use_8580 ? RESID_8580_FILTER_GAIN_MIN : RESID_6581_FILTER_GAIN_MIN,
+      use_8580 ? RESID_8580_FILTER_GAIN_MAX : RESID_6581_FILTER_GAIN_MAX, 1,
+      use_8580 ? RESID_8580_FILTER_GAIN_DEFAULT
+               : RESID_6581_FILTER_GAIN_DEFAULT);
+  sid_filter_osd_ranges[chipno][SID_FILTER_OSD_GAIN] = child;
+  child->on_value_changed = sid_filter_osd_item_changed;
+
+  snprintf(label, sizeof(label), "SID%d %s Filter Bias (mV)", chipno + 1,
+           model_name);
+  child = add_resid_range(
+      sid2 ? (use_8580 ? MENU_SID2_RESID_8580_FILTER_BIAS
+                       : MENU_SID2_RESID_6581_FILTER_BIAS)
+           : (use_8580 ? MENU_SID_RESID_8580_FILTER_BIAS
+                       : MENU_SID_RESID_6581_FILTER_BIAS),
+      root, label,
+      sid_filter_osd_resource(chipno, model, SID_FILTER_OSD_BIAS),
+      use_8580 ? RESID_8580_FILTER_BIAS_MIN : RESID_6581_FILTER_BIAS_MIN,
+      use_8580 ? RESID_8580_FILTER_BIAS_MAX : RESID_6581_FILTER_BIAS_MAX,
+      100,
+      use_8580 ? RESID_8580_FILTER_BIAS_DEFAULT
+               : RESID_6581_FILTER_BIAS_DEFAULT);
+  sid_filter_osd_ranges[chipno][SID_FILTER_OSD_BIAS] = child;
+  child->ministep = 10;
+  child->divisor =
+      use_8580 ? RESID_8580_FILTER_BIAS_ONE : RESID_6581_FILTER_BIAS_ONE;
+  child->on_value_changed = sid_filter_osd_item_changed;
+}
+
+static void show_sid_filter_osd(void) {
+  struct menu_item *root;
+  struct menu_item *child;
+  int engine;
+  int sid1_model;
+  int sid2_model;
+  int show_sid2;
+  int rows;
+
+  /* A second invocation closes the active OSD, matching the other OSDs. */
+  if (ui_enabled) {
+    ui_dismiss_osd_if_active();
+    return;
+  }
+
+  engine = resource_int_or_default("SidEngine", SID_ENGINE_RESID);
+  sid1_model = resource_int_or_default("SidModel", SID_MODEL_6581);
+  sid2_model = resource_int_or_default("Sid2Model", SID_MODEL_6581);
+  sid_filter_osd_models[0] = sid1_model;
+  sid_filter_osd_models[1] = sid2_model;
+  memset(sid_filter_osd_ranges, 0, sizeof(sid_filter_osd_ranges));
+  show_sid2 = machine_supports_dual_sid();
+  rows = 1 + (engine == SID_ENGINE_RESID ? 3 : 0);
+  if (show_sid2) {
+    rows += 2 + (engine == SID_ENGINE_RESID ? 3 : 0);
+    sid2_filter_settings_ensure_initialized();
+  }
+
+  root = ui_push_menu(38, rows);
+  root->on_popped_off = sid_filter_osd_popped;
+  sid_filter_osd_sid2_item = NULL;
+
+  child = add_resource_toggle(MENU_SID_FILTER, root, "SID1 Filter",
+                              "SidFilters");
+  child->on_value_changed = sid_filter_osd_item_changed;
+  if (engine == SID_ENGINE_RESID) {
+    add_sid_filter_osd_ranges(root, 0, sid1_model);
+  }
+
+  if (show_sid2) {
+    ui_menu_add_divider(root);
+    child = sid_filter_osd_sid2_item =
+        ui_menu_add_multiple_choice(MENU_SID2_FILTER, root, "SID2 Filter");
+    child->on_value_changed = sid_filter_osd_item_changed;
+    if (engine == SID_ENGINE_RESID) {
+      add_sid_filter_osd_ranges(root, 1, sid2_model);
+    }
+  }
+
+  sync_sid_filter_osd_items();
+  ui_enable_osd();
+}
+
 int emux_handle_quick_func(int button_func, fullpath_func f_fullpath) {
   int drive;
   struct menu_item *root;
   struct menu_item *child;
   switch (button_func) {
+    case BTN_ASSIGN_SID_FILTER_OSD:
+       show_sid_filter_osd();
+       return 1;
     case BTN_ASSIGN_CART_FREEZE:
        cartridge_freeze();
        return 1;
@@ -1394,8 +2050,8 @@ void emux_save_additional_settings(FILE *fp) {
 void emux_get_default_color_setting(int *brightness, int *contrast,
                                     int *gamma, int *tint, int *saturation) {
     *brightness = 1000;
-    *contrast = 1250;
-    *gamma = 2200;
+    *contrast = 1000;
+    *gamma = 1000;
     *tint = 1000;
     *saturation = 1000;
 }

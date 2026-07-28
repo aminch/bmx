@@ -28,8 +28,19 @@
 #ifndef VICE_SID_RESOURCES_H
 #define VICE_SID_RESOURCES_H
 
+#define SID2_FILTERS_SAME_AS_SID1 (-1)
+#define SID2_FILTERS_OFF 0
+#define SID2_FILTERS_ON 1
+
 int sid_resources_init(void);
 int sid_common_resources_init(void);
+int sid_get_model_for_chip(int chipno);
+int sid_get_filters_for_chip(int chipno);
+void sid_get_resid_filter_for_chip(int chipno, int model,
+                                   int *passband_percentage,
+                                   int *gain_percentage,
+                                   int *filter_bias_mV);
+void sid2_filter_settings_ensure_initialized(void);
 
 int sid_set_sid2_address(int val, void *param);
 int sid_set_sid3_address(int val, void *param);

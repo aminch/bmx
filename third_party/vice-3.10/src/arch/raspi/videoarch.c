@@ -233,6 +233,7 @@ int video_canvas_set_palette(struct video_canvas_s *canvas, palette_t *p) {
   }
 
   circle_update_palette_fbl(layer);
+  return 0;
 }
 
 static void check_dimensions(struct video_canvas_s* canvas,

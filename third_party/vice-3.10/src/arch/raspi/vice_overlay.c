@@ -34,6 +34,12 @@
 
 // RASPI includes
 #include "emux_api.h"
+#include "overlay.h"
+
+// Called by VICE to update the warp status indicator
+void ui_display_warp_status(int warp) {
+  overlay_warp_changed(warp);
+}
 
 // Called by VICE to enable a drive status lights
 void ui_enable_drive_status(ui_drive_enable_t state, int *drive_led_color) {

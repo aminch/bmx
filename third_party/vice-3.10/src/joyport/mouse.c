@@ -28,12 +28,10 @@
  *
  */
 
-/* Important requirements to arch specific mouse drivers for proper operation:
- * - mousedrv_get_x and mousedrv_get_y MUST return a value with at
- *   least 16 valid bits in LSB.
- * - mousedrv_get_timestamp MUST give the time stamp when the last
- *   mouse movement happened. A button press is not a movement!
-*/
+/* Architecture drivers can pass relative movement to mouse_move(). Drivers
+ * receiving input on another execution context can transfer it from their
+ * mousedrv_poll() hook instead.
+ */
 
 /* #define DEBUG_MOUSE */
 
@@ -202,6 +200,11 @@ void mouse_poll(void)
     tick_t os_now, os_iv, os_iv2;
     CLOCK emu_now, emu_iv, emu_iv2;
     int diff_x, diff_y;
+
+#ifdef MOUSEDRV_HAS_POLL
+    /* Transfer arch input on the emulator core before touching common state. */
+    mousedrv_poll();
+#endif
 
     DBG(("mouse_poll"));
 

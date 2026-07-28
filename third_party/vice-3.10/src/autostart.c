@@ -702,6 +702,9 @@ static void set_warp_mode(int on)
 {
     log_message(autostart_log, "Turning Warp mode %s.", on ? "on" : "off");
     vsync_set_warp_mode(on);
+#ifdef RASPI_COMPILE
+    ui_display_warp_status(on);
+#endif
 }
 
 static int get_device_traps_state(int unit)

@@ -179,6 +179,15 @@ bool ValidateApiAssetUrl(const GitHubReleaseAsset &asset) {
                UrlPolicyStatus::Ok;
 }
 
+AssetUrlStatus ValidateAssetUrlForKind(const GitHubReleaseAsset &asset,
+                                       const char *tag,
+                                       GitHubReleaseKind kind) {
+    return kind == GitHubReleaseKind::PreparedDraft
+               ? (ValidateApiAssetUrl(asset) ? AssetUrlStatus::Ok
+                                             : AssetUrlStatus::BindingMismatch)
+               : ValidateAssetUrl(asset, tag);
+}
+
 void ResetRequired(RequiredGitHubReleaseAssets *required) {
     required->manifest = 0;
     required->signature = 0;
@@ -228,7 +237,7 @@ RequiredGitHubAssetsStatus FindReleaseMetadataAssetsForKind(
             }
         }
         const AssetUrlStatus url_status =
-            ValidateAssetUrl(asset, release.tag_name);
+            ValidateAssetUrlForKind(asset, release.tag_name, kind);
         if (url_status == AssetUrlStatus::Rejected) {
             return RequiredGitHubAssetsStatus::UrlRejected;
         }
@@ -434,7 +443,7 @@ GitHubReleaseParseStatus ParseGitHubRelease(
             }
         }
         const AssetUrlStatus url_status =
-            ValidateAssetUrl(output, release->tag_name);
+            ValidateAssetUrlForKind(output, release->tag_name, kind);
         if (url_status == AssetUrlStatus::Rejected) {
             return GitHubReleaseParseStatus::UrlRejected;
         }
@@ -505,7 +514,7 @@ RequiredGitHubAssetsStatus FindRequiredAssetsForKind(
             }
         }
         const AssetUrlStatus url_status =
-            ValidateAssetUrl(asset, signed_manifest_tag);
+            ValidateAssetUrlForKind(asset, signed_manifest_tag, kind);
         if (url_status == AssetUrlStatus::Rejected) {
             return RequiredGitHubAssetsStatus::UrlRejected;
         }

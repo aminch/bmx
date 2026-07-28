@@ -27,6 +27,7 @@
 #include <circle/input/mouse.h>
 #include <circle/interrupt.h>
 #include <circle/logger.h>
+#include <circle/sched/task.h>
 #include <circle/serial.h>
 #include <circle/spinlock.h>
 #include <circle/timer.h>
@@ -141,10 +142,27 @@ public:
 			int bilinear_interpolation);
 
 private:
+  class USBPlugAndPlayTask;
+
+  struct USBGamepadInfo {
+    int numPads;
+    int numButtons[MAX_USB_DEVICES];
+    int numAxes[MAX_USB_DEVICES];
+    int numHats[MAX_USB_DEVICES];
+    int knownMapping[MAX_USB_DEVICES];
+    int alternativeMapping[MAX_USB_DEVICES];
+  };
+
   void InitSound();
   void SetupUSBKeyboard();
   void SetupUSBMouse();
   void SetupUSBGamepads();
+  void UpdateUSBPlugAndPlay();
+  void ApplyUSBGamepadInfo();
+  void ApplyUSBAudioChange();
+  static void MouseRemovedHandler(CDevice *pDevice, void *pContext);
+  static void KeyRemovedHandler(CDevice *pDevice, void *pContext);
+  static void GamePadRemovedHandler(CDevice *pDevice, void *pContext);
   int ReadDebounced(int pinIndex);
   void ScanKeyboard();
   void ReadJoystick(int device, int gpioConfig);
@@ -153,15 +171,21 @@ private:
   void ReadWriteUserport();
 
   ViceSound *mViceSound;
-  CUSBKeyboardDevice *mUSBKeyboards[MAX_USB_DEVICES];
-  CMouseDevice *mUSBMouse;
-  CUSBGamePadDevice *mUSBGamepads[MAX_USB_DEVICES];
-  boolean mUSBServicesReady;
+  USBPlugAndPlayTask *mUSBPlugAndPlayTask;
+  CUSBKeyboardDevice *volatile mUSBKeyboards[MAX_USB_DEVICES];
+  CMouseDevice *volatile mUSBMouse;
+  CUSBGamePadDevice *volatile mUSBGamepads[MAX_USB_DEVICES];
+  CSpinLock mUSBGamepadInfoLock;
+  USBGamepadInfo mUSBGamepadInfo;
+  boolean mUSBGamepadInfoPending;
+  boolean mUSBOutputAvailable;
+  boolean mUSBAudioChangePending;
   CCPUThrottle mCPUThrottle;
   CSpinLock m_Lock;
   int mNumJoy;
   int mVolume;
   SoundOutputPriority mSoundOutputPriority;
+  unsigned mSoundSampleRate;
   int mNumCoresComplete;
   bool mNeedSoundInit;
   int mNumSoundChannels;

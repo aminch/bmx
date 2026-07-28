@@ -311,6 +311,9 @@ static int do_on_text_field_return(struct menu_item *item) {
 
 static void ui_type_char(char ch) {
   struct menu_item *cur = menu_cursor_item[current_menu];
+  if (cur == NULL) {
+    return;
+  }
   if (cur->type == TEXTFIELD) {
     if (cur->disabled) {
       return;
@@ -666,10 +669,12 @@ static void apply_text_field_before_focus_change(struct menu_item *item) {
 }
 
 static void ui_action(long action) {
+  int action_menu = current_menu;
   struct menu_item *cur = menu_cursor_item[current_menu];
   switch (action) {
   case ACTION_Up:
     apply_text_field_before_focus_change(cur);
+    if (current_menu != action_menu) return;
     menu_cursor[current_menu]--;
     cursor_pos_updated();
     if (menu_cursor[current_menu] < 0) {
@@ -683,6 +688,7 @@ static void ui_action(long action) {
     break;
   case ACTION_Down:
     apply_text_field_before_focus_change(cur);
+    if (current_menu != action_menu) return;
     menu_cursor[current_menu]++;
     cursor_pos_updated();
     if (menu_cursor[current_menu] >= max_index[current_menu]) {
@@ -1574,6 +1580,8 @@ static void ui_clear_menu(int menu_index) {
   struct menu_item *node = &menu_roots[menu_index];
   ui_clear_child_menu(node->first_child);
   node->first_child = NULL;
+  menu_cursor_item[menu_index] = NULL;
+  max_index[menu_index] = 0;
 }
 
 struct menu_item *ui_pop_menu(void) {
@@ -1917,40 +1925,50 @@ struct menu_item *ui_confirm_wrapped_cancel_default(char *title,
 
 // These nav functions are really inefficient...but oh well.
 void ui_page_down() {
-  for (int n=0;n<menu_height_chars;n++) {
+  int menu_index = current_menu;
+  for (int n=0;n<menu_height_chars && current_menu == menu_index;n++) {
     ui_action(ACTION_Down);
   }
 }
 
 void ui_page_up() {
-  for (int n=0;n<menu_height_chars;n++) {
+  int menu_index = current_menu;
+  for (int n=0;n<menu_height_chars && current_menu == menu_index;n++) {
     ui_action(ACTION_Up);
   }
 }
 
 void ui_to_top() {
-  while (menu_cursor[current_menu] != 0) {
+  int menu_index = current_menu;
+  while (current_menu == menu_index && menu_cursor[current_menu] != 0) {
     ui_action(ACTION_Up);
   }
 }
 
 void ui_to_bottom() {
-  while (menu_cursor[current_menu] < max_index[current_menu] - 1) {
+  int menu_index = current_menu;
+  while (current_menu == menu_index &&
+         menu_cursor[current_menu] < max_index[current_menu] - 1) {
     ui_action(ACTION_Down);
   }
 }
 
 void ui_find_first(char letter) {
 
+  int menu_index = current_menu;
   int start_index = menu_cursor[current_menu];
 
-  while(1) {
+  while(current_menu == menu_index) {
     // Move down or wrap around to the top if we hit the bottom.
     if (menu_cursor[current_menu] >= max_index[current_menu] - 1) {
-       ui_to_top();
+      ui_to_top();
     } else {
-       ui_action(ACTION_Down);
+      ui_action(ACTION_Down);
     }
+
+    // A text-field callback can open an error dialog or close the menu.
+    // Never continue a cursor search in a different menu stack frame.
+    if (current_menu != menu_index) break;
 
     // Did we get back to where we started? Bail.
     if (menu_cursor[current_menu] == start_index) break;
@@ -1968,13 +1986,38 @@ void ui_find_first(char letter) {
 // the cursor to a known location. Also useful after a call to
 // ui_to_top() to do the same.
 void ui_set_cur_pos(int pos) {
-  while(menu_cursor[current_menu] < pos &&
-        menu_cursor[current_menu] < max_index[current_menu] - 1) {
-    ui_action(ACTION_Down);
+  int visible_rows;
 
-    // We need to recompute max_index and the cursor after each move.
-    ui_traverse();
+  // Programmatic positioning must not run interactive focus-change callbacks.
+  // Such callbacks may push/pop menus and invalidate this stack frame.
+  ui_traverse();
+  if (max_index[current_menu] <= 0) {
+    menu_cursor[current_menu] = 0;
+    menu_cursor_item[current_menu] = NULL;
+    return;
   }
+
+  if (pos < 0) {
+    pos = 0;
+  } else if (pos >= max_index[current_menu]) {
+    pos = max_index[current_menu] - 1;
+  }
+
+  visible_rows =
+      menu_window_bottom[current_menu] - menu_window_top[current_menu];
+  if (visible_rows < 1) visible_rows = 1;
+
+  menu_cursor[current_menu] = pos;
+  if (pos < menu_window_top[current_menu]) {
+    menu_window_top[current_menu] = pos;
+    menu_window_bottom[current_menu] = pos + visible_rows;
+  } else if (pos >= menu_window_bottom[current_menu]) {
+    menu_window_bottom[current_menu] = pos + 1;
+    menu_window_top[current_menu] =
+        menu_window_bottom[current_menu] - visible_rows;
+  }
+
+  ui_traverse();
 }
 
 struct menu_item* ui_find_item_by_id(struct menu_item *node, int id) {
