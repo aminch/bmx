@@ -2,7 +2,7 @@ CIRCLE_STDLIB_HOME ?= ../circle-stdlib
 include $(CIRCLE_STDLIB_HOME)/Config.mk
 include Config.mk
 
-OBJ = demo.o emux_api.o font.o joy.o kbd.o keycodes.o menu.o menu_confirm_osd.o menu_reset_osd.o menu_key_binding.o menu_gpio.o menu_keyset.o menu_switch.o menu_tape_osd.o menu_timing.o menu_usb.o overlay.o raspi_util.o text.o ui.o semaphore.o
+OBJ = demo.o emux_api.o font.o joy.o kbd.o keycodes.o menu.o menu_confirm_osd.o menu_reset_osd.o menu_key_binding.o menu_gpio.o menu_keyset.o menu_switch.o menu_tape_osd.o menu_timing.o menu_usb.o overlay.o raspi_util.o text.o ui.o semaphore.o usb_gamepad_defaults.o
 
 INCLUDES = -I $(CIRCLE_STDLIB_INSTALL_DIR)/include \
 	   -I $(CIRCLE_STDLIB_HOME)/include \

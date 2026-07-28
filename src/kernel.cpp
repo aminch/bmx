@@ -25,6 +25,11 @@
 #include <string.h>
 
 #include <circle/gpiopin.h>
+#include <circle/usb/usbdevice.h>
+
+extern "C" {
+#include "third_party/common/usb_gamepad_defaults.h"
+}
 
 CKernel *static_kernel = NULL;
 
@@ -716,6 +721,15 @@ if (static_kernel->circle_get_ticks() - entry_start >= entry_delay) {
       value |= emu_add_button_values(nDeviceIndex, b);
       emu_set_joy_usb_interrupt(nDeviceIndex, value);
     }
+  } else if (prev_buttons[nDeviceIndex] != b) {
+    // Fix to stop never ending rotation of USB Directions in Gamepad menu
+    prev_buttons[nDeviceIndex] = b;
+    handle_button_function(ui_activated, nDeviceIndex, b);
+
+    if (!ui_activated) {
+      emu_set_joy_usb_interrupt(nDeviceIndex,
+                                emu_add_button_values(nDeviceIndex, b));
+    }
   }
 }
 
@@ -771,6 +785,18 @@ void CKernel::SetupUSBGamepads() {
 
     if (game_pad != mUSBGamepads[i]) {
       if (game_pad) {
+        CString *vendor = game_pad->GetDevice()->GetName(DeviceNameVendor);
+        unsigned profile = USB_GAMEPAD_DEFAULT_PROFILE_NONE;
+        if (vendor != 0) {
+          profile = usb_gamepad_default_profile_for_vendor((const char *) *vendor);
+          CLogger::Get()->Write("kernel", LogNotice,
+                                "Gamepad %s uses mapping profile %u",
+                                (const char *) *vendor, profile);
+          delete vendor;
+        }
+        emu_set_usb_gamepad_mapping_profile(i, profile);
+        emu_set_usb_gamepad_display_name(i, game_pad->GetProperty(CDevice::PropertyProduct));
+
         game_pad->RegisterStatusHandler(GamePadStatusHandler);
         printf("usb: registered gamepad upad%u\r\n", i + 1);
       }
