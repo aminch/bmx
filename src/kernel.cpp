@@ -18,6 +18,11 @@
 
 #include "platform/platform.h"
 
+#if defined(BMX_SID_WORKER) || defined(BMX_SID_DIAGNOSTICS)
+#include "sidworker.h"
+#endif
+
+#include <ctype.h>
 #include <errno.h>
 #include <math.h>
 #include <stdio.h>
@@ -44,6 +49,31 @@ static bool uiRightShift = false;
 
 static int vol_percent_to_vchiq(int percent) {
   return bmc64::VolumePercentToDeviceControl(percent);
+}
+
+static void copy_usb_product(char *destination, unsigned destination_size,
+                             const char *product) {
+  unsigned written = 0;
+
+  if (destination == nullptr || destination_size == 0) {
+    return;
+  }
+  destination[0] = '\0';
+  if (product == nullptr) {
+    return;
+  }
+
+  while (*product != '\0' && isspace((unsigned char)*product)) {
+    product++;
+  }
+  while (*product != '\0' && written + 1U < destination_size) {
+    unsigned char c = (unsigned char)*product++;
+    destination[written++] = c < 0x20U || c == 0x7FU ? ' ' : (char)c;
+  }
+  while (written > 0 && destination[written - 1U] == ' ') {
+    written--;
+  }
+  destination[written] = '\0';
 }
 
 // Real keyboard matrix states
@@ -388,7 +418,7 @@ private:
 CKernel::CKernel(void)
     : ViceStdioApp("vice"), mViceSound(nullptr),
       mUSBPlugAndPlayTask(nullptr), mUSBMouse(nullptr),
-      mUSBGamepadInfoLock(TASK_LEVEL), mUSBGamepadInfoPending(FALSE),
+      mUSBDeviceInfoLock(TASK_LEVEL), mUSBDeviceInfoPending(FALSE),
       mUSBOutputAvailable(FALSE), mUSBAudioChangePending(FALSE),
       mNumJoy(emu_get_num_joysticks()),
       mVolume(100), mSoundOutputPriority(ViceSound::DefaultOutputPriority()),
@@ -403,7 +433,8 @@ CKernel::CKernel(void)
     mUSBKeyboards[i] = nullptr;
     mUSBGamepads[i] = nullptr;
   }
-  memset(&mUSBGamepadInfo, 0, sizeof mUSBGamepadInfo);
+  memset(&mUSBDeviceInfo, 0, sizeof mUSBDeviceInfo);
+  memset(mUSBOutputProduct, 0, sizeof mUSBOutputProduct);
 
   // Only used for pins that are used as buttons. See viceapp.h.
   for (int i = 0; i < NUM_GPIO_PINS; i++) {
@@ -828,6 +859,22 @@ void CKernel::SetupUSBGamepads() {
   int num_hats[MAX_USB_DEVICES] = {0, 0, 0, 0};
   int known_mapping[MAX_USB_DEVICES] = {0, 0, 0, 0};
   int alternative_mapping[MAX_USB_DEVICES] = {0, 0, 0, 0};
+  int gamepad_present[MAX_USB_DEVICES] = {0, 0, 0, 0};
+  char gamepad_product[MAX_USB_DEVICES][BMX_USB_PRODUCT_STRING_SIZE] = {};
+  int keyboard_count = 0;
+  char keyboard_product[MAX_USB_DEVICES][BMX_USB_PRODUCT_STRING_SIZE] = {};
+  char usb_output_product_raw[BMX_USB_PRODUCT_STRING_SIZE] = {};
+  char usb_output_product[BMX_USB_PRODUCT_STRING_SIZE] = {};
+
+  for (unsigned i = 0; i < MAX_USB_DEVICES; i++) {
+    if (mUSBKeyboards[i] != nullptr) {
+      copy_usb_product(keyboard_product[keyboard_count],
+                       sizeof keyboard_product[keyboard_count],
+                       mUSBKeyboards[i]->GetProperty(CDevice::PropertyProduct));
+      keyboard_count++;
+    }
+  }
+
   for (unsigned i = 0; i < MAX_USB_DEVICES; i++) {
     CString DeviceName;
     DeviceName.Format("upad%u", i + 1);
@@ -848,6 +895,10 @@ void CKernel::SetupUSBGamepads() {
       continue;
     }
 
+    gamepad_present[i] = 1;
+    copy_usb_product(gamepad_product[i], sizeof gamepad_product[i],
+                     game_pad->GetProperty(CDevice::PropertyProduct));
+
     const TGamePadState *pState = game_pad->GetInitialState();
     assert(pState != 0);
 
@@ -861,34 +912,58 @@ void CKernel::SetupUSBGamepads() {
     num_pads = i + 1;
   }
 
-  mUSBGamepadInfoLock.Acquire();
-  mUSBGamepadInfo.numPads = num_pads;
-  memcpy(mUSBGamepadInfo.numButtons, num_buttons, sizeof num_buttons);
-  memcpy(mUSBGamepadInfo.numAxes, num_axes, sizeof num_axes);
-  memcpy(mUSBGamepadInfo.numHats, num_hats, sizeof num_hats);
-  memcpy(mUSBGamepadInfo.knownMapping, known_mapping, sizeof known_mapping);
-  memcpy(mUSBGamepadInfo.alternativeMapping, alternative_mapping,
+  boolean usb_output_available = ViceSound::GetUSBOutputProduct(
+      usb_output_product_raw, sizeof usb_output_product_raw);
+  copy_usb_product(usb_output_product, sizeof usb_output_product,
+                   usb_output_product_raw);
+  __atomic_store_n(&mUSBOutputAvailable, usb_output_available,
+                   __ATOMIC_RELAXED);
+
+  mUSBDeviceInfoLock.Acquire();
+  mUSBDeviceInfo.numPads = num_pads;
+  memcpy(mUSBDeviceInfo.numButtons, num_buttons, sizeof num_buttons);
+  memcpy(mUSBDeviceInfo.numAxes, num_axes, sizeof num_axes);
+  memcpy(mUSBDeviceInfo.numHats, num_hats, sizeof num_hats);
+  memcpy(mUSBDeviceInfo.knownMapping, known_mapping, sizeof known_mapping);
+  memcpy(mUSBDeviceInfo.alternativeMapping, alternative_mapping,
          sizeof alternative_mapping);
-  mUSBGamepadInfoPending = TRUE;
-  mUSBGamepadInfoLock.Release();
+  memcpy(mUSBDeviceInfo.gamepadPresent, gamepad_present,
+         sizeof gamepad_present);
+  memcpy(mUSBDeviceInfo.gamepadProduct, gamepad_product,
+         sizeof gamepad_product);
+  mUSBDeviceInfo.keyboardCount = keyboard_count;
+  memcpy(mUSBDeviceInfo.keyboardProduct, keyboard_product,
+         sizeof keyboard_product);
+  memcpy(mUSBDeviceInfo.usbOutputProduct, usb_output_product,
+         sizeof usb_output_product);
+  mUSBDeviceInfoPending = TRUE;
+  mUSBDeviceInfoLock.Release();
 }
 
-void CKernel::ApplyUSBGamepadInfo() {
-  USBGamepadInfo gamepad_info;
+void CKernel::ApplyUSBDeviceInfo() {
+  USBDeviceInfo device_info;
 
-  mUSBGamepadInfoLock.Acquire();
-  if (!mUSBGamepadInfoPending) {
-    mUSBGamepadInfoLock.Release();
+  mUSBDeviceInfoLock.Acquire();
+  if (!mUSBDeviceInfoPending) {
+    mUSBDeviceInfoLock.Release();
     return;
   }
-  gamepad_info = mUSBGamepadInfo;
-  mUSBGamepadInfoPending = FALSE;
-  mUSBGamepadInfoLock.Release();
+  device_info = mUSBDeviceInfo;
+  mUSBDeviceInfoPending = FALSE;
+  mUSBDeviceInfoLock.Release();
 
-  emu_set_gamepad_info(gamepad_info.numPads, gamepad_info.numButtons,
-                       gamepad_info.numAxes, gamepad_info.numHats,
-                       gamepad_info.knownMapping,
-                       gamepad_info.alternativeMapping);
+  emu_set_gamepad_info(device_info.numPads, device_info.numButtons,
+                       device_info.numAxes, device_info.numHats,
+                       device_info.knownMapping,
+                       device_info.alternativeMapping,
+                       device_info.gamepadPresent,
+                       device_info.gamepadProduct);
+  emu_set_keyboard_info(device_info.keyboardCount,
+                        device_info.keyboardProduct);
+  memcpy(mUSBOutputProduct, device_info.usbOutputProduct,
+         sizeof mUSBOutputProduct);
+  // The audio change may have been applied before this pending name snapshot.
+  PublishCurrentSoundOutput();
 }
 
 void CKernel::UpdateUSBPlugAndPlay() {
@@ -902,8 +977,6 @@ void CKernel::UpdateUSBPlugAndPlay() {
     SetupUSBGamepads();
     printf("usb: gamepad scan complete\r\n");
 
-    __atomic_store_n(&mUSBOutputAvailable, ViceSound::USBOutputAvailable(),
-                     __ATOMIC_RELAXED);
     __atomic_store_n(&mUSBAudioChangePending, TRUE, __ATOMIC_RELEASE);
   }
 }
@@ -931,6 +1004,20 @@ void CKernel::ApplyUSBAudioChange() {
     mViceSound->USBPlugAndPlayChanged(usb_output_available,
                                      mSoundOutputPriority);
   }
+  PublishCurrentSoundOutput();
+}
+
+void CKernel::PublishCurrentSoundOutput() {
+  enum bmx_sound_output output = BMX_SOUND_OUTPUT_NONE;
+
+  if (mViceSound != nullptr) {
+    if (mViceSound->USBOutputSelected()) {
+      output = BMX_SOUND_OUTPUT_USB;
+    } else if (mViceSound->HDMIOutputSelected()) {
+      output = BMX_SOUND_OUTPUT_HDMI;
+    }
+  }
+  emu_set_current_sound_output(output, mUSBOutputProduct);
 }
 
 ViceApp::TShutdownMode CKernel::Run(void) {
@@ -949,7 +1036,7 @@ ViceApp::TShutdownMode CKernel::Run(void) {
   printf("boot: setup usb gamepads ready\r\n");
 
 #ifndef BMC64_USE_EMU_MULTICORE
-  ApplyUSBGamepadInfo();
+  ApplyUSBDeviceInfo();
 #endif
 
   emu_set_demo_mode(mViceOptions.DemoEnabled());
@@ -1402,6 +1489,7 @@ int CKernel::circle_sound_init(const char *param, int *speed, int *fragsize,
      mViceSound->SetSampleRate(mSoundSampleRate);
      mViceSound->Playback(vol_percent_to_vchiq(mVolume), mNumSoundChannels,
                           mSoundOutputPriority);
+     PublishCurrentSoundOutput();
   }
 #ifdef BMC64_USE_EMU_MULTICORE
   circle_lock_release();
@@ -1412,6 +1500,9 @@ int CKernel::circle_sound_init(const char *param, int *speed, int *fragsize,
 // Called from VICE: Core 1
 int CKernel::circle_sound_write(int16_t *pbuf, size_t nr) {
   ApplyUSBAudioChange();
+#if BMX_SID_DIAGNOSTICS
+  bmx_sid_diag_record_pcm(pbuf, nr);
+#endif
   if (mViceSound) {
     return mViceSound->AddChunk(pbuf, nr);
   }
@@ -1427,15 +1518,22 @@ int CKernel::circle_sound_suspend(void) { return 0; }
 int CKernel::circle_sound_resume(void) { return 0; }
 
 int CKernel::circle_sound_bufferspace(void) {
+  unsigned free_frames;
+
   ApplyUSBAudioChange();
   if (mViceSound) {
-    return mViceSound->BufferSpaceSamples();
+    free_frames = mViceSound->BufferSpaceSamples();
+  } else {
+    free_frames = FRAG_SIZE * NUM_FRAGS;
   }
-  return FRAG_SIZE * NUM_FRAGS;
+#if BMX_SID_DIAGNOSTICS
+  bmx_sid_diag_record_queue(FRAG_SIZE * NUM_FRAGS, free_frames);
+#endif
+  return free_frames;
 }
 
 void CKernel::circle_yield(void) {
-  ApplyUSBGamepadInfo();
+  ApplyUSBDeviceInfo();
   ApplyUSBAudioChange();
   CScheduler::Get()->Yield();
 }
@@ -1660,6 +1758,7 @@ void CKernel::circle_check_gpio() {
      if (mViceSound) {
        mViceSound->Playback(vol_percent_to_vchiq(mVolume), mNumSoundChannels,
                             mSoundOutputPriority);
+       PublishCurrentSoundOutput();
        mNeedSoundInit = false;
      }
   }
@@ -1796,6 +1895,7 @@ void CKernel::circle_boot_complete() {
        }
        mViceSound->Playback(vol_percent_to_vchiq(mVolume), mNumSoundChannels,
                             mSoundOutputPriority);
+       PublishCurrentSoundOutput();
     } else {
        // Cores 1/2 are still initializing sound tables. We'll init
        // sound later.  This is to get around the crashing noise you
@@ -1811,6 +1911,7 @@ void CKernel::circle_boot_complete() {
     }
     mViceSound->Playback(vol_percent_to_vchiq(mVolume), mNumSoundChannels,
                          mSoundOutputPriority);
+    PublishCurrentSoundOutput();
 #endif
   }
 

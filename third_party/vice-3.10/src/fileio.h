@@ -36,6 +36,7 @@
 #define FILEIO_COMMAND_APPEND      4
 #define FILEIO_COMMAND_APPEND_READ 5
 #define FILEIO_COMMAND_STAT        6  /* works with directories */
+#define FILEIO_COMMAND_DIRECTORY   7  /* already enumerated; avoid re-probing */
 #define FILEIO_COMMAND_MASK        15
 #define FILEIO_COMMAND_FSNAME      16
 

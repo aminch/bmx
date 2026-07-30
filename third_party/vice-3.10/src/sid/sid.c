@@ -51,6 +51,11 @@
 #include "sound.h"
 #include "types.h"
 
+#if defined(RASPI_COMPILE) && \
+    (defined(BMX_SID_WORKER) || defined(BMX_SID_DIAGNOSTICS))
+#include "sidworker.h"
+#endif
+
 #ifdef HAVE_MOUSE
 #include "mouse.h"
 #include "lightpen.h"
@@ -74,6 +79,11 @@ static void (*sid_store_func)(uint16_t addr, uint8_t val, int chipno);
 static int (*sid_dump_func)(int chipno);
 
 static int sid_enable, sid_engine_type = -1;
+
+#if BMX_SID_WORKER
+/* Variable-rate SID backends use module-global scratch buffers. */
+static int sid_worker_factor_compatible = 1;
+#endif
 
 #ifdef HAVE_MOUSE
 static CLOCK pot_cycle = 0;  /* pot sampling cycle */
@@ -624,11 +634,17 @@ GETBUFx(7)
 
 int sid_sound_machine_init_vbr(sound_t *psid, int speed, int cycles_per_sec, int factor)
 {
+#if BMX_SID_WORKER
+    sid_worker_factor_compatible = factor == 1000;
+#endif
     return sid_engine.init(psid, speed * factor / 1000, cycles_per_sec, factor);
 }
 
 int sid_sound_machine_init(sound_t *psid, int speed, int cycles_per_sec)
 {
+#if BMX_SID_WORKER
+    sid_worker_factor_compatible = 1;
+#endif
     #ifdef HAVE_USBSID
     usbsid_open();
     #endif
@@ -877,8 +893,82 @@ int sid_sound_machine_calculate_samples(sound_t **psid, int16_t *pbuf, int nr, i
         return tmp_nr;
     }
     if (soc == SOUND_OUTPUT_STEREO && scc == SOUND_2_DEVICES) {
+#if BMX_SID_WORKER || BMX_SID_DIAGNOSTICS
+        int local_nr;
+        CLOCK local_delta_t = *delta_t;
+        uint64_t pair_begin = bmx_sid_diag_now_us();
+        uint64_t local_begin;
+        uint64_t local_us;
+        uint64_t second_begin;
+        uint64_t second_us;
+        struct bmx_sid_pair_metrics metrics = { 0 };
+
+#if BMX_SID_WORKER
+        if (sid_worker_factor_compatible && bmx_sid_worker_available()) {
+            int worker_nr;
+            CLOCK worker_delta_t = *delta_t;
+            uint64_t worker_us;
+            uint64_t wait_begin;
+            uint64_t wait_us;
+
+            /* Keep core 2 on a contiguous buffer. Besides avoiding cache-line
+               contention, this preserves the factor-1000 backend's exact
+               sample order; core 1 interleaves it after both SIDs finish. */
+            tmp_buf1 = getbuf1(nr);
+            if (bmx_sid_worker_submit(sid_engine.calculate_samples, psid[1],
+                                      tmp_buf1, nr, SOUND_OUTPUT_MONO,
+                                      worker_delta_t)) {
+                local_begin = bmx_sid_diag_now_us();
+                local_nr = sid_engine.calculate_samples(psid[0], pbuf, nr,
+                                                        SOUND_OUTPUT_STEREO,
+                                                        &local_delta_t);
+                local_us = bmx_sid_diag_now_us() - local_begin;
+
+                wait_begin = bmx_sid_diag_now_us();
+                bmx_sid_worker_wait(&worker_nr, &worker_delta_t, &worker_us);
+                wait_us = bmx_sid_diag_now_us() - wait_begin;
+
+                for (i = 0; i < worker_nr; i++) {
+                    pbuf[(i * 2) + 1] = tmp_buf1[i];
+                }
+                *delta_t = worker_delta_t;
+
+                metrics.pair_us = bmx_sid_diag_now_us() - pair_begin;
+                metrics.local_us = local_us;
+                metrics.worker_us = worker_us;
+                metrics.wait_us = wait_us;
+                metrics.frames = nr > 0 ? (uint32_t)nr : 0;
+                metrics.parallel = 1;
+                metrics.sample_count_mismatch = local_nr != worker_nr;
+                metrics.clock_mismatch = local_delta_t != worker_delta_t;
+                bmx_sid_diag_record_pair(&metrics);
+                return worker_nr;
+            }
+        }
+#endif
+
+        local_begin = bmx_sid_diag_now_us();
+        local_nr = sid_engine.calculate_samples(psid[0], pbuf, nr,
+                                                SOUND_OUTPUT_STEREO,
+                                                &tmp_delta_t);
+        local_us = bmx_sid_diag_now_us() - local_begin;
+        second_begin = bmx_sid_diag_now_us();
+        tmp_nr = sid_engine.calculate_samples(psid[1], pbuf + 1, nr,
+                                              SOUND_OUTPUT_STEREO, delta_t);
+        second_us = bmx_sid_diag_now_us() - second_begin;
+
+        metrics.pair_us = bmx_sid_diag_now_us() - pair_begin;
+        metrics.local_us = local_us;
+        metrics.worker_us = second_us;
+        metrics.frames = nr > 0 ? (uint32_t)nr : 0;
+        metrics.fallback = 1;
+        metrics.sample_count_mismatch = local_nr != tmp_nr;
+        metrics.clock_mismatch = tmp_delta_t != *delta_t;
+        bmx_sid_diag_record_pair(&metrics);
+#else
         tmp_nr = sid_engine.calculate_samples(psid[0], pbuf, nr, SOUND_OUTPUT_STEREO, &tmp_delta_t);
         tmp_nr = sid_engine.calculate_samples(psid[1], pbuf + 1, nr, SOUND_OUTPUT_STEREO, delta_t);
+#endif
         return tmp_nr;
     }
     if (soc == SOUND_OUTPUT_STEREO && scc == SOUND_3_DEVICES) {

@@ -193,6 +193,13 @@ struct menu_item *hotkey_tf5_item;
 struct menu_item *hotkey_tf7_item;
 struct menu_item *volume_item;
 struct menu_item *sound_output_priority_item;
+static struct menu_item *current_sound_output_item;
+static struct menu_item *detected_keyboard_items[MAX_USB_DEVICES];
+static enum bmx_sound_output current_sound_output = BMX_SOUND_OUTPUT_NONE;
+static int detected_keyboard_count;
+static char current_usb_audio_product[BMX_USB_PRODUCT_STRING_SIZE];
+static char detected_keyboard_product[MAX_USB_DEVICES]
+                                     [BMX_USB_PRODUCT_STRING_SIZE];
 struct menu_item *statusbar_item;
 struct menu_item *diagnostics_overlay_item;
 struct menu_item *statusbar_padding_item;
@@ -328,7 +335,8 @@ const char phonebook_filt_ext[1][5] = {".pb"};
 static const char system_volume_name[8] = "SYS:";
 static const char user_volume_name[8] = "USER:";
 static const char default_dir_names[NUM_DIR_TYPES][16] = {
-    "/", "/disks", "/tapes", "/carts", "/snapshots", "/roms", "/", "/"};
+    "/", "/disks", "/tapes", "/carts", "/snapshots", "/roms", "/drives",
+    "/", "/"};
 
 // Keep track of the current volume for each file dialog type.
 static char current_volume_names[NUM_DIR_TYPES][8];
@@ -434,15 +442,41 @@ static const char *default_volume_for_dir_type(DirType dir_type) {
   return system_volume_name;
 }
 
-static char *fullpath(DirType dir_type, char *name) {
-  strcpy(full_path_str, current_volume_names[dir_type]);
-  strcat(full_path_str, current_dir_names[dir_type]);
-  // Put a trailing slash unless we are at the root
-  if (current_dir_names[dir_type][strlen(
-      current_dir_names[dir_type])-1] != '/'){
-    strcat(full_path_str, "/");
+static int build_path(char *destination, size_t destination_size,
+                      const char *volume, const char *directory,
+                      const char *name) {
+  const size_t directory_length = strlen(directory);
+  const char *separator = "";
+  int written;
+
+  if (directory_length > 0 && directory[directory_length - 1] != '/') {
+    separator = "/";
   }
-  strcat(full_path_str, name);
+
+  written = snprintf(destination, destination_size, "%s%s%s%s", volume,
+                     directory, separator, name);
+  if (written < 0 || (size_t)written >= destination_size) {
+    if (destination_size > 0) {
+      destination[0] = '\0';
+    }
+    return -1;
+  }
+
+  return 0;
+}
+
+static int fullpath_fits(DirType dir_type, const char *name) {
+  char candidate[sizeof full_path_str];
+
+  return build_path(candidate, sizeof candidate,
+                    current_volume_names[dir_type],
+                    current_dir_names[dir_type], name) == 0;
+}
+
+static char *fullpath(DirType dir_type, char *name) {
+  (void)build_path(full_path_str, sizeof full_path_str,
+                   current_volume_names[dir_type],
+                   current_dir_names[dir_type], name);
   return full_path_str;
 }
 
@@ -566,6 +600,10 @@ static void list_files(struct menu_item *parent,
         continue;
       }
       ++entries_seen;
+
+      if (!fullpath_fits(dir_type, ep->d_name)) {
+        continue;
+      }
 
       DirentTypeSource type_source;
       if (dirent_is_dir(dir_type, ep, &type_source)) {
@@ -1903,6 +1941,69 @@ static void set_button_display(struct menu_item *item, const char *value) {
   strncpy(item->displayed_value, value, MAX_DSP_VAL_LEN - 1);
   item->displayed_value[MAX_DSP_VAL_LEN - 1] = '\0';
   item->prefer_str = 1;
+}
+
+static const char *present_device_name(int present, const char *product) {
+  if (!present) {
+    return "None";
+  }
+  return product != NULL && product[0] != '\0' ? product : "Unknown";
+}
+
+static void update_detected_keyboard_items(void) {
+  int i;
+
+  for (i = 0; i < MAX_USB_DEVICES; i++) {
+    struct menu_item *item = detected_keyboard_items[i];
+    if (item == NULL) {
+      continue;
+    }
+    item->hidden = i > 0 && i >= detected_keyboard_count;
+    ui_menu_set_button_value_fitted(
+        item,
+        i < detected_keyboard_count
+            ? present_device_name(1, detected_keyboard_product[i])
+            : "None",
+        1);
+  }
+}
+
+static void update_current_sound_output_item(void) {
+  const char *value = "None";
+
+  if (current_sound_output == BMX_SOUND_OUTPUT_HDMI) {
+    value = "HDMI";
+  } else if (current_sound_output == BMX_SOUND_OUTPUT_USB) {
+    value = present_device_name(1, current_usb_audio_product);
+  }
+  ui_menu_set_button_value_fitted(current_sound_output_item, value, 2);
+}
+
+void emu_set_keyboard_info(
+    int count,
+    const char product[MAX_USB_DEVICES][BMX_USB_PRODUCT_STRING_SIZE]) {
+  int i;
+
+  detected_keyboard_count = count < 0 ? 0
+                            : count > MAX_USB_DEVICES ? MAX_USB_DEVICES
+                                                      : count;
+  for (i = 0; i < MAX_USB_DEVICES; i++) {
+    const char *source = product != NULL ? product[i] : "";
+    strncpy(detected_keyboard_product[i], source,
+            BMX_USB_PRODUCT_STRING_SIZE - 1);
+    detected_keyboard_product[i][BMX_USB_PRODUCT_STRING_SIZE - 1] = '\0';
+  }
+  update_detected_keyboard_items();
+}
+
+void emu_set_current_sound_output(enum bmx_sound_output output,
+                                  const char *usb_product) {
+  current_sound_output = output;
+  strncpy(current_usb_audio_product,
+          usb_product != NULL ? usb_product : "",
+          sizeof current_usb_audio_product - 1);
+  current_usb_audio_product[sizeof current_usb_audio_product - 1] = '\0';
+  update_current_sound_output_item();
 }
 
 static const char *default_disk_machine_dir(void) {
@@ -3447,6 +3548,7 @@ static void set_current_dir_names() {
 
   // These don't change
   strcpy(current_dir_names[DIR_ROMS], machine_sub_dir);
+  strcpy(current_dir_names[DIR_DRIVE_ROMS], "/drives");
   strcpy(current_dir_names[DIR_IEC], "/");
   strcpy(current_dir_names[DIR_PHONEBOOK], "/");
 
@@ -3494,7 +3596,16 @@ static void select_file(struct menu_item *item) {
      case MENU_DRIVE_ROM_FILE_1571:
      case MENU_DRIVE_ROM_FILE_1581:
      case MENU_DRIVE_ROM_FILE_CMDHD:
-       emux_handle_rom_change(item, fullpath);
+       if (strcasecmp(current_volume_names[DIR_DRIVE_ROMS],
+                      system_volume_name) != 0 ||
+           strcasecmp(current_dir_names[DIR_DRIVE_ROMS], "/drives") != 0) {
+         ui_error("Drive ROMs must be in SYS:/drives");
+         return;
+       }
+       if (emux_handle_rom_change(item, fullpath) != 0) {
+         ui_error("Invalid or missing drive ROM");
+         return;
+       }
        // Two pops necessary here.
        ui_pop_menu();
        ui_pop_menu();
@@ -3518,7 +3629,10 @@ static void select_file(struct menu_item *item) {
      case MENU_C128_LOAD_CHARGEN_FILE:
      case MENU_C128_LOAD_64_KERNAL_FILE:
      case MENU_C128_LOAD_64_BASIC_FILE:
-       emux_handle_rom_change(item, fullpath);
+       if (emux_handle_rom_change(item, fullpath) != 0) {
+         ui_error("Invalid or missing ROM");
+         return;
+       }
        ui_pop_all_and_toggle();
        return;
      case MENU_AUTOSTART_FILE:
@@ -3693,12 +3807,20 @@ static int menu_file_item_to_dir_index(struct menu_item *item) {
   case MENU_KERNAL_FILE:
   case MENU_BASIC_FILE:
   case MENU_CHARGEN_FILE:
+  case MENU_C128_LOAD_KERNAL_FILE:
+  case MENU_C128_LOAD_BASIC_HI_FILE:
+  case MENU_C128_LOAD_BASIC_LO_FILE:
+  case MENU_C128_LOAD_CHARGEN_FILE:
+  case MENU_C128_LOAD_64_KERNAL_FILE:
+  case MENU_C128_LOAD_64_BASIC_FILE:
+    return DIR_ROMS;
   case MENU_DRIVE_ROM_FILE_1541:
   case MENU_DRIVE_ROM_FILE_1541II:
   case MENU_DRIVE_ROM_FILE_1551:
   case MENU_DRIVE_ROM_FILE_1571:
   case MENU_DRIVE_ROM_FILE_1581:
-    return DIR_ROMS;
+  case MENU_DRIVE_ROM_FILE_CMDHD:
+    return DIR_DRIVE_ROMS;
   case MENU_LOADPRG_FILE:
     return DIR_ROOT;
   case MENU_AUTOSTART_FILE:
@@ -3780,12 +3902,15 @@ static void relist_files_after_dir_change(int menu_id) {
   case MENU_C128_LOAD_CHARGEN_FILE:
   case MENU_C128_LOAD_64_KERNAL_FILE:
   case MENU_C128_LOAD_64_BASIC_FILE:
+    show_files(DIR_ROMS, FILTER_NONE, menu_id, 1);
+    break;
   case MENU_DRIVE_ROM_FILE_1541:
   case MENU_DRIVE_ROM_FILE_1541II:
   case MENU_DRIVE_ROM_FILE_1551:
   case MENU_DRIVE_ROM_FILE_1571:
   case MENU_DRIVE_ROM_FILE_1581:
-    show_files(DIR_ROMS, FILTER_NONE, menu_id, 1);
+  case MENU_DRIVE_ROM_FILE_CMDHD:
+    show_files(DIR_DRIVE_ROMS, FILTER_NONE, menu_id, 1);
     break;
   case MENU_AUTOSTART_FILE:
     show_files(DIR_DISKS, FILTER_NONE, menu_id, 1);
@@ -3825,14 +3950,18 @@ static void up_dir(struct menu_item *item) {
 static void enter_dir(struct menu_item *item) {
   int dir_index = menu_file_item_to_dir_index(item);
   int menu_id = item->id;
+  char next_dir[sizeof current_dir_names[0]];
+  char full_candidate[sizeof full_path_str];
   if (dir_index < 0)
     return;
-  // Append this item's value to current dir
-  if (current_dir_names[dir_index][strlen(current_dir_names[dir_index]) - 1] !=
-      '/') {
-    strcat(current_dir_names[dir_index], "/");
+  if (build_path(next_dir, sizeof next_dir, "",
+                 current_dir_names[dir_index], item->str_value) != 0 ||
+      build_path(full_candidate, sizeof full_candidate,
+                 current_volume_names[dir_index], next_dir, "") != 0) {
+    ui_error("Path too long");
+    return;
   }
-  strcat(current_dir_names[dir_index], item->str_value);
+  strcpy(current_dir_names[dir_index], next_dir);
   ui_pop_menu();
   relist_files_after_dir_change(menu_id);
 }
@@ -4332,22 +4461,22 @@ static void menu_value_changed(struct menu_item *item) {
     show_files(DIR_DISKS, FILTER_DISK, MENU_DISK_FILE, 0);
     return;
   case MENU_DRIVE_CHANGE_ROM_1541:
-    show_files(DIR_ROMS, FILTER_NONE, MENU_DRIVE_ROM_FILE_1541, 0);
+    show_files(DIR_DRIVE_ROMS, FILTER_NONE, MENU_DRIVE_ROM_FILE_1541, 0);
     return;
   case MENU_DRIVE_CHANGE_ROM_1541II:
-    show_files(DIR_ROMS, FILTER_NONE, MENU_DRIVE_ROM_FILE_1541II, 0);
+    show_files(DIR_DRIVE_ROMS, FILTER_NONE, MENU_DRIVE_ROM_FILE_1541II, 0);
     return;
   case MENU_DRIVE_CHANGE_ROM_1551:
-    show_files(DIR_ROMS, FILTER_NONE, MENU_DRIVE_ROM_FILE_1551, 0);
+    show_files(DIR_DRIVE_ROMS, FILTER_NONE, MENU_DRIVE_ROM_FILE_1551, 0);
     return;
   case MENU_DRIVE_CHANGE_ROM_1571:
-    show_files(DIR_ROMS, FILTER_NONE, MENU_DRIVE_ROM_FILE_1571, 0);
+    show_files(DIR_DRIVE_ROMS, FILTER_NONE, MENU_DRIVE_ROM_FILE_1571, 0);
     return;
   case MENU_DRIVE_CHANGE_ROM_1581:
-    show_files(DIR_ROMS, FILTER_NONE, MENU_DRIVE_ROM_FILE_1581, 0);
+    show_files(DIR_DRIVE_ROMS, FILTER_NONE, MENU_DRIVE_ROM_FILE_1581, 0);
     return;
   case MENU_DRIVE_CHANGE_ROM_CMDHD:
-    show_files(DIR_ROMS, FILTER_NONE, MENU_DRIVE_ROM_FILE_CMDHD, 0);
+    show_files(DIR_DRIVE_ROMS, FILTER_NONE, MENU_DRIVE_ROM_FILE_CMDHD, 0);
     return;
   case MENU_ATTACH_TAPE:
     show_files(DIR_TAPES, FILTER_TAPE, MENU_TAPE_FILE, 0);
@@ -6172,8 +6301,9 @@ void build_menu(struct menu_item *root) {
   struct menu_item *sound_output_parent =
       ui_menu_add_folder(sound_parent, "Output");
 
-  volume_item = ui_menu_add_range(MENU_VOLUME, sound_output_parent,
-      "Volume", 0, 100, 1, 100);
+  current_sound_output_item = ui_menu_add_button_with_value(
+      MENU_TEXT, sound_output_parent, "Current Output", 0, "", "");
+  update_current_sound_output_item();
 
   sound_output_priority_item = child =
       ui_menu_add_multiple_choice(MENU_SOUND_OUTPUT_PRIORITY,
@@ -6187,6 +6317,9 @@ void build_menu(struct menu_item *root) {
   strcpy(child->choices[1], "USB, HDMI");
   child->choice_ints[1] = SOUND_OUTPUT_PRIORITY_USB_HDMI;
 
+  volume_item = ui_menu_add_range(MENU_VOLUME, sound_output_parent,
+      "Volume", 0, 100, 1, 100);
+
   struct menu_item *sound_emulation_parent =
       ui_menu_add_folder(sound_parent, "Emulation");
   struct menu_item *sound_sid_parent =
@@ -6196,6 +6329,15 @@ void build_menu(struct menu_item *root) {
                          sound_parent);
 
   parent = ui_menu_add_folder(root, "Keyboard");
+
+  for (i = 0; i < MAX_USB_DEVICES; i++) {
+    char label[16];
+    snprintf(label, sizeof label, "Detected %d", i + 1);
+    detected_keyboard_items[i] = ui_menu_add_button_with_value(
+        MENU_TEXT, parent, label, 0, "", "");
+  }
+  update_detected_keyboard_items();
+  ui_menu_add_divider(parent);
 
   emux_add_keyboard_options(parent);
 

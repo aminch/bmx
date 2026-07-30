@@ -69,6 +69,7 @@ static USBMappingMode usb_mapping_modes[MAX_USB_DEVICES];
 static int usb_mapping_initialized;
 
 static int configured_device = -1;
+static struct menu_item *gamepad_status_item;
 static struct menu_item *mapping_mode_item;
 static struct menu_item *direction_item;
 static struct menu_item *analog_x_item;
@@ -120,10 +121,51 @@ static void apply_automatic_mapping(int device) {
   write_mapping(device, &mapping);
 }
 
+static void update_gamepad_status_item(int device) {
+  char status[MAX_MENU_STR];
+
+  if (gamepad_status_item == NULL) {
+    return;
+  }
+  if (!joy_present[device]) {
+    strcpy(gamepad_status_item->name, "NOT DETECTED");
+    return;
+  }
+
+  const char *product = joy_product[device][0] != '\0'
+                            ? joy_product[device]
+                            : "Unknown";
+  char capabilities[32];
+  snprintf(capabilities, sizeof capabilities, ", %d hats, %d axes",
+           joy_num_hats[device], joy_num_axes[device]);
+
+  size_t max_length = sizeof status - 1U;
+  size_t capabilities_length = strlen(capabilities);
+  size_t product_length = strlen(product);
+  if (product_length + capabilities_length <= max_length) {
+    snprintf(status, sizeof status, "%s%s", product, capabilities);
+  } else if (capabilities_length + 4U <= max_length) {
+    int prefix_length = (int)(max_length - capabilities_length - 3U);
+    snprintf(status, sizeof status, "%.*s...%s", prefix_length, product,
+             capabilities);
+  } else {
+    snprintf(status, sizeof status, "%s", capabilities + 2);
+  }
+
+  strncpy(gamepad_status_item->name, status, MAX_MENU_STR - 1);
+  gamepad_status_item->name[MAX_MENU_STR - 1] = '\0';
+}
+
 static void refresh_open_mapping_menu(int device) {
   int i;
 
-  if (configured_device != device || mapping_mode_item == NULL) {
+  if (configured_device != device) {
+    return;
+  }
+
+  update_gamepad_status_item(device);
+
+  if (mapping_mode_item == NULL) {
     return;
   }
 
@@ -199,8 +241,8 @@ void menu_usb_gamepad_info_changed(void) {
   for (device = 0; device < MAX_USB_DEVICES; device++) {
     if (usb_mapping_modes[device] == USB_MAPPING_AUTOMATIC) {
       apply_automatic_mapping(device);
-      refresh_open_mapping_menu(device);
     }
+    refresh_open_mapping_menu(device);
   }
 }
 
@@ -224,6 +266,7 @@ static void mapping_menu_popped(struct menu_item *new_root,
   (void)new_root;
   (void)old_root;
   configured_device = -1;
+  gamepad_status_item = NULL;
   mapping_mode_item = NULL;
   direction_item = NULL;
   analog_x_item = NULL;
@@ -454,7 +497,7 @@ static void add_button_choices(struct menu_item *tmp_item) {
 
 void build_usb_menu(int dev, struct menu_item *root) {
   struct menu_item *tmp_item;
-  char desc[40];
+  char slot[16];
   char scratch[32];
   int i;
 
@@ -462,16 +505,10 @@ void build_usb_menu(int dev, struct menu_item *root) {
   memset(button_items, 0, sizeof(button_items));
   root->on_popped_off = mapping_menu_popped;
 
-  sprintf(desc, "USB %d:",dev+1);
-  if (joy_num_pads > dev) {
-    strcat(desc, "DETECTED ");
-    sprintf(scratch, "%d hats, %d axes", joy_num_hats[dev], joy_num_axes[dev]);
-    strcat(desc, scratch);
-  } else {
-    strcat(desc, "NOT DETECTED");
-  }
-
-  ui_menu_add_button(MENU_TEXT, root, desc);
+  snprintf(slot, sizeof slot, "USB %d", dev + 1);
+  ui_menu_add_button(MENU_TEXT, root, slot);
+  gamepad_status_item = ui_menu_add_button(MENU_TEXT, root, "");
+  update_gamepad_status_item(dev);
   ui_menu_add_divider(root);
 
   mapping_mode_item =

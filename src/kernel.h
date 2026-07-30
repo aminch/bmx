@@ -144,13 +144,18 @@ public:
 private:
   class USBPlugAndPlayTask;
 
-  struct USBGamepadInfo {
+  struct USBDeviceInfo {
     int numPads;
     int numButtons[MAX_USB_DEVICES];
     int numAxes[MAX_USB_DEVICES];
     int numHats[MAX_USB_DEVICES];
     int knownMapping[MAX_USB_DEVICES];
     int alternativeMapping[MAX_USB_DEVICES];
+    int gamepadPresent[MAX_USB_DEVICES];
+    char gamepadProduct[MAX_USB_DEVICES][BMX_USB_PRODUCT_STRING_SIZE];
+    int keyboardCount;
+    char keyboardProduct[MAX_USB_DEVICES][BMX_USB_PRODUCT_STRING_SIZE];
+    char usbOutputProduct[BMX_USB_PRODUCT_STRING_SIZE];
   };
 
   void InitSound();
@@ -158,8 +163,9 @@ private:
   void SetupUSBMouse();
   void SetupUSBGamepads();
   void UpdateUSBPlugAndPlay();
-  void ApplyUSBGamepadInfo();
+  void ApplyUSBDeviceInfo();
   void ApplyUSBAudioChange();
+  void PublishCurrentSoundOutput();
   static void MouseRemovedHandler(CDevice *pDevice, void *pContext);
   static void KeyRemovedHandler(CDevice *pDevice, void *pContext);
   static void GamePadRemovedHandler(CDevice *pDevice, void *pContext);
@@ -175,11 +181,12 @@ private:
   CUSBKeyboardDevice *volatile mUSBKeyboards[MAX_USB_DEVICES];
   CMouseDevice *volatile mUSBMouse;
   CUSBGamePadDevice *volatile mUSBGamepads[MAX_USB_DEVICES];
-  CSpinLock mUSBGamepadInfoLock;
-  USBGamepadInfo mUSBGamepadInfo;
-  boolean mUSBGamepadInfoPending;
+  CSpinLock mUSBDeviceInfoLock;
+  USBDeviceInfo mUSBDeviceInfo;
+  boolean mUSBDeviceInfoPending;
   boolean mUSBOutputAvailable;
   boolean mUSBAudioChangePending;
+  char mUSBOutputProduct[BMX_USB_PRODUCT_STRING_SIZE];
   CCPUThrottle mCPUThrottle;
   CSpinLock m_Lock;
   int mNumJoy;

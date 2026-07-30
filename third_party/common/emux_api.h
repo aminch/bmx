@@ -85,7 +85,7 @@ typedef enum {
 
 // For file type dialogs. Determines what dir we start in. Used
 // as index into default_dir_names and current_dir_names in menu.c
-#define NUM_DIR_TYPES 8
+#define NUM_DIR_TYPES 9
 typedef enum {
    DIR_ROOT,
    DIR_DISKS,
@@ -93,6 +93,7 @@ typedef enum {
    DIR_CARTS,
    DIR_SNAPS,
    DIR_ROMS,
+   DIR_DRIVE_ROMS,
    DIR_IEC,
    DIR_PHONEBOOK,
 } DirType;
@@ -441,7 +442,7 @@ int emux_get_vkbd_height(void);
 int emux_get_vkbd_size(void);
 
 // Handles one of the MENU_*_FILE rom change events from the menu
-void emux_handle_rom_change(struct menu_item* item, fullpath_func f_fullpath);
+int emux_handle_rom_change(struct menu_item* item, fullpath_func f_fullpath);
 
 // Sets the directory for IEC emulation.
 void emux_set_iec_dir(int unit, char* dir);

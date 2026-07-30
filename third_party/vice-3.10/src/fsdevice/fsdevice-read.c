@@ -385,6 +385,8 @@ static void command_directory_get(vdrive_t *vdrive, bufinfo_t *bufinfo,
     const char *direntry;
     size_t filelen;
     unsigned int isdir;
+    archdep_dir_entry_info_t entry_info;
+    int entry_info_valid = 0;
     fileio_info_t *finfo = NULL;
     unsigned int format = 0;
     char buf[ARCHDEP_PATH_MAX];
@@ -416,8 +418,16 @@ static void command_directory_get(vdrive_t *vdrive, bufinfo_t *bufinfo,
             break;
         }
 
-        finfo = fileio_open(direntry, bufinfo->dir, format,
-                            FILEIO_COMMAND_STAT | FILEIO_COMMAND_FSNAME,
+        entry_info_valid =
+            archdep_readdir_get_info(bufinfo->host_dir, &entry_info) == 0;
+
+        finfo = fileio_open(direntry, bufinfo->dir,
+                            entry_info_valid && entry_info.is_directory
+                                ? format & ~FILEIO_FORMAT_P00
+                                : format,
+                            (entry_info_valid ? FILEIO_COMMAND_DIRECTORY
+                                              : FILEIO_COMMAND_STAT) |
+                                FILEIO_COMMAND_FSNAME,
                             FILEIO_TYPE_PRG, NULL);
 
         if (finfo == NULL) {
@@ -495,16 +505,23 @@ static void command_directory_get(vdrive_t *vdrive, bufinfo_t *bufinfo,
         *p++ = 1;
         *p++ = 1;
 
-        statrc = archdep_stat(buf, &filelen, &isdir);
-        if (statrc != 0) {
-            /* this file can't be opened */
-            splatfile = 1;
-            protectfile = 1;
-        }
+        if (entry_info_valid) {
+            filelen = entry_info.size;
+            isdir = entry_info.is_directory;
+            statrc = 0;
+            protectfile = entry_info.is_read_only;
+        } else {
+            statrc = archdep_stat(buf, &filelen, &isdir);
+            if (statrc != 0) {
+                /* this file can't be opened */
+                splatfile = 1;
+                protectfile = 1;
+            }
 
-        if (archdep_access(buf, ARCHDEP_ACCESS_W_OK)) {
-            /* this file is read only */
-            protectfile = 1;
+            if (archdep_access(buf, ARCHDEP_ACCESS_W_OK)) {
+                /* this file is read only */
+                protectfile = 1;
+            }
         }
 
         blocks = (filelen + 253) / 254;

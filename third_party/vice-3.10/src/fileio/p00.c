@@ -379,6 +379,7 @@ fileio_info_t *p00_open(const char *file_name, const char *path,
     } else {
         switch (command & FILEIO_COMMAND_MASK) {
             case FILEIO_COMMAND_STAT:
+            case FILEIO_COMMAND_DIRECTORY:
             case FILEIO_COMMAND_READ:
             case FILEIO_COMMAND_READ_WRITE:
             case FILEIO_COMMAND_APPEND:
@@ -404,6 +405,15 @@ fileio_info_t *p00_open(const char *file_name, const char *path,
 
     type = p00_check_name(fname);
 
+    /* A host filename read from disk that is visibly not X00 cannot contain
+       a P00 wrapper.  Keep the existing write/overwrite semantics intact. */
+    if (type < 0
+            && (command & FILEIO_COMMAND_MASK) != FILEIO_COMMAND_WRITE
+            && (command & FILEIO_COMMAND_MASK) != FILEIO_COMMAND_OVERWRITE) {
+        lib_free(fname);
+        return NULL;
+    }
+
     rawfile = rawfile_open(fname, path, command & FILEIO_COMMAND_MASK);
     lib_free(fname);
 
@@ -413,16 +423,17 @@ fileio_info_t *p00_open(const char *file_name, const char *path,
 
     switch (command & FILEIO_COMMAND_MASK) {
         case FILEIO_COMMAND_STAT:
+        case FILEIO_COMMAND_DIRECTORY:
         case FILEIO_COMMAND_READ:
         case FILEIO_COMMAND_READ_WRITE:
-            if (type < 0 || p00_read_header(rawfile, (uint8_t *)rname, &reclen) < 0) {
+            if (p00_read_header(rawfile, (uint8_t *)rname, &reclen) < 0) {
                 rawfile_destroy(rawfile);
                 return NULL;
             }
             break;
         case FILEIO_COMMAND_APPEND:
         case FILEIO_COMMAND_APPEND_READ:
-            if (type < 0 || p00_read_header(rawfile, (uint8_t *)rname, &reclen) < 0) {
+            if (p00_read_header(rawfile, (uint8_t *)rname, &reclen) < 0) {
                 rawfile_destroy(rawfile);
                 return NULL;
             }

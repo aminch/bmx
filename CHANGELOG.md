@@ -1,3 +1,24 @@
+Version 2026.07.30
+------------------
+* New features
+  * Support for 8BitDo Ultimate 2 (2.4GHz, Bluetooth, Wired)
+  * Provided by aminch: Support for 8BitDo Ultimate C.
+  * Productstrings of detected USB devices are displayed for Keyboards,
+    Gamepads and Sound devices in the respective menu.
+  * PI5: SID 2 is offloaded to a free CPU core.
+  * Reworked build system that supports much faster incremental builds.
+  * IEC listing of files had a complexity of O(n^2). Now it is O(n).
+
+* Bugfixes
+  * Sound devices were switchted after the BMX menu was closed. Now it
+    is switched even if the menu is open, so that the current active
+    device can be correctly displayed.
+  * The updater did not allow new directories on the sdcard.
+  * The usb sound device was not correctly displayed under all
+    circumstances.
+  * ROM selection should not freeze on invalid drive ROMs or overlong
+    paths.
+
 Version 2026.07.28
 ------------------
 * New features

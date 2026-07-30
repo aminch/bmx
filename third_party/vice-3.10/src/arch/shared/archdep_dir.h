@@ -54,9 +54,23 @@
  * order in a case-sensitive manner and thus sorted Unix-style and not Windows-
  * style (where case folding is normally applied).
  */
+typedef struct archdep_dir_entry_s {
+    char *name;
+    size_t size;
+    unsigned int is_directory;
+    unsigned int is_read_only;
+    unsigned int metadata_valid;
+} archdep_dir_entry_t;
+
+typedef struct archdep_dir_entry_info_s {
+    size_t size;
+    unsigned int is_directory;
+    unsigned int is_read_only;
+} archdep_dir_entry_info_t;
+
 typedef struct archdep_dir_s {
-    char **dirs;        /**< list of directories */
-    char **files;       /**< list of files */
+    archdep_dir_entry_t *dirs;   /**< list of directories */
+    archdep_dir_entry_t *files;  /**< list of files */
     int dir_amount;     /**< number of entries in `dirs` */
     int file_amount;    /**< number of entries in `files` */
     int pos;            /**< position in directory, adding together dirs and
@@ -68,6 +82,8 @@ typedef struct archdep_dir_s {
 
 archdep_dir_t * archdep_opendir(const char *path, int mode);
 const char *    archdep_readdir(archdep_dir_t *dir);
+int             archdep_readdir_get_info(const archdep_dir_t *dir,
+                                         archdep_dir_entry_info_t *info);
 void            archdep_closedir(archdep_dir_t *dir);
 void            archdep_rewinddir(archdep_dir_t *dir);
 void            archdep_seekdir(archdep_dir_t *dir, int pos);

@@ -144,27 +144,8 @@ ManifestParseStatus RegistryStatusToManifestStatus(
     return ManifestParseStatus::UnsupportedConfiguration;
 }
 
-const char *Basename(const char *path) {
-    const char *slash = strrchr(path, '/');
-    return slash == 0 ? path : slash + 1;
-}
-
-bool TopEquals(const char *path, const char *expected) {
-    const char *slash = strchr(path, '/');
-    const size_t size = slash == 0 ? strlen(path)
-                                   : static_cast<size_t>(slash - path);
-    return strlen(expected) == size && memcmp(path, expected, size) == 0;
-}
-
 bool StartsWith(const char *value, const char *prefix) {
     return strncmp(value, prefix, strlen(prefix)) == 0;
-}
-
-bool EndsWith(const char *value, const char *suffix) {
-    const size_t value_size = strlen(value);
-    const size_t suffix_size = strlen(suffix);
-    return value_size >= suffix_size &&
-           memcmp(value + value_size - suffix_size, suffix, suffix_size) == 0;
 }
 
 bool IsSafeManifestPath(const char *path) {
@@ -190,84 +171,6 @@ bool ParseMachineKernelSuffix(const char *suffix, uint16_t *machine_bit) {
             ? static_cast<uint16_t>(UINT16_C(1) << machine_index) : 0U;
     }
     return true;
-}
-
-bool ConvertPolicy(path_policy::RulePolicy input, ManifestFilePolicy *output) {
-    if (output == 0) return false;
-    switch (input) {
-    case path_policy::RulePolicy::ConfigTemplate:
-        *output = ManifestFilePolicy::ConfigTemplate;
-        return true;
-    case path_policy::RulePolicy::ManagedReplace:
-        *output = ManifestFilePolicy::ManagedReplace;
-        return true;
-    case path_policy::RulePolicy::Metadata:
-        *output = ManifestFilePolicy::Metadata;
-        return true;
-    case path_policy::RulePolicy::Preserve:
-        *output = ManifestFilePolicy::Preserve;
-        return true;
-    case path_policy::RulePolicy::Kernel:
-        *output = ManifestFilePolicy::Kernel;
-        return true;
-    }
-    return false;
-}
-
-bool ClassifyKnownPath(const char *path, ManifestFilePolicy *policy) {
-    if (path == 0 || policy == 0) return false;
-    const char *const basename = Basename(path);
-    for (size_t index = 0U; index < path_policy::kFileRuleCount; ++index) {
-        const path_policy::Rule &rule = path_policy::kFileRules[index];
-        if (rule.kind == path_policy::RuleKind::MachineKernel) {
-            for (size_t base_index = 0U;
-                 base_index < path_policy::kMachineKernelBaseCount;
-                 ++base_index) {
-                const char *const base =
-                    path_policy::kMachineKernelBases[base_index];
-                const size_t base_size = strlen(base);
-                if (strncmp(path, base, base_size) == 0 &&
-                    path[base_size] == '.' &&
-                    ParseMachineKernelSuffix(path + base_size + 1U, 0)) {
-                    return ConvertPolicy(path_policy::kMachineKernelPolicy, policy);
-                }
-            }
-            continue;
-        }
-        if (rule.root != 0 && !TopEquals(path, rule.root)) continue;
-
-        bool matched = false;
-        switch (rule.kind) {
-        case path_policy::RuleKind::ExactPath:
-            matched = strcmp(path, rule.value) == 0;
-            break;
-        case path_policy::RuleKind::TopRoot:
-            matched = true;
-            break;
-        case path_policy::RuleKind::BasenameExact:
-            matched = strcmp(basename, rule.value) == 0;
-            break;
-        case path_policy::RuleKind::BasenamePrefixSuffix:
-            matched = StartsWith(basename, rule.value) &&
-                      EndsWith(basename, rule.suffix);
-            break;
-        case path_policy::RuleKind::BasenameSuffix:
-            matched = EndsWith(basename, rule.suffix);
-            break;
-        case path_policy::RuleKind::MachineKernel:
-            break;
-        }
-        if (matched) return ConvertPolicy(rule.policy, policy);
-    }
-    return false;
-}
-
-bool IsAllowedUpdateDirectory(const char *path) {
-    if (path == 0) return false;
-    for (size_t index = 0U; index < path_policy::kDirectoryRootCount; ++index) {
-        if (TopEquals(path, path_policy::kDirectoryRoots[index])) return true;
-    }
-    return false;
 }
 
 class Parser {
@@ -659,9 +562,6 @@ ManifestParseStatus Parser::ParseDirectories(int index, bool store,
             (i != 0U && strcmp(previous, path) >= 0)) {
             return ManifestParseStatus::InvalidValue;
         }
-        if (!IsAllowedUpdateDirectory(path)) {
-            return ManifestParseStatus::InventoryMismatch;
-        }
         if (store) {
             memcpy(storage_.directories[i].path, path, strlen(path) + 1U);
         }
@@ -719,10 +619,9 @@ ManifestParseStatus Parser::ParseFiles(int index, bool store,
                         sizeof(compression))) {
             return ManifestParseStatus::InvalidValue;
         }
-        ManifestFilePolicy expected_policy;
-        if (!ClassifyKnownPath(parsed.path, &expected_policy)) {
-            return ManifestParseStatus::InventoryMismatch;
-        }
+        // Paths and install policies are covered by the release signature.
+        // The device enforces mechanical safety and the stable boot inventory;
+        // the release pipeline owns the extensible SD-card layout.
         if (strcmp(policy, "kernel") == 0) {
             parsed.policy = ManifestFilePolicy::Kernel;
         } else if (strcmp(policy, "managed-replace") == 0) {
@@ -735,9 +634,6 @@ ManifestParseStatus Parser::ParseFiles(int index, bool store,
             parsed.policy = ManifestFilePolicy::Metadata;
         } else {
             return ManifestParseStatus::InvalidValue;
-        }
-        if (parsed.policy != expected_policy) {
-            return ManifestParseStatus::InventoryMismatch;
         }
         if (strcmp(compression, "store") == 0) {
             parsed.compression = ManifestCompression::Store;
@@ -769,6 +665,9 @@ ManifestParseStatus Parser::ParseFiles(int index, bool store,
                 uint16_t machine_bit = 0U;
                 if (!ParseMachineKernelSuffix(
                         parsed.path + kernel_size + 1U, &machine_bit)) {
+                    return ManifestParseStatus::InventoryMismatch;
+                }
+                if (parsed.policy != ManifestFilePolicy::Kernel) {
                     return ManifestParseStatus::InventoryMismatch;
                 }
                 if (machine_bit != 0U) {

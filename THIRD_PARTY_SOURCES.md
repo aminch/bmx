@@ -86,17 +86,21 @@ stored in git.
 | Role | Bare-metal C/C++ runtime and Circle integration used by Pi4 and Pi5 builds |
 | Source archive | `third_party/source-cache/circle-stdlib-v20-a4fbed9b-full.tar.gz` |
 | Archive SHA-256 | `e25e4c5087f608defb026a5eaa195a35f41838cd0286e1fb415449756ad6bce0` |
-| Pi4 build path | `build/pi4/circle-stdlib` |
-| Pi5 build path | `build/pi5/circle-stdlib` |
+| Pi4 build path | `build/pi4/circle-variants/<profile>-<hash>/circle-stdlib` |
+| Pi5 build path | `build/pi5/circle-variants/<profile>-<hash>/circle-stdlib` |
 | Upstream URL | https://github.com/smuehlst/circle-stdlib |
 | Version/tag | `v20` |
 | Commit | `a4fbed9b369e8285e4a12b2bb0588511210b83a6` |
 | Commit URL | https://github.com/smuehlst/circle-stdlib/commit/a4fbed9b369e8285e4a12b2bb0588511210b83a6 |
 
 Both Pi4 and Pi5 build helpers extract the same pinned source archive into
-separate build directories so each board can be configured independently without
-re-downloading Circle sources. BMX changes are then applied from
-`third_party/circle-stdlib-patches/`.
+configuration-isolated build directories so each board, toolchain and build
+profile can be cached independently without re-downloading Circle sources.
+BMX changes are then applied from `third_party/circle-stdlib-patches/`. On a
+fresh build root, `build/<board>/circle-stdlib` is an active-tree convenience
+symlink for patch and diagnostic work; target builds use the immutable variant
+path directly. A pre-existing real directory at the convenience path is never
+overwritten automatically.
 
 ### Circle submodule inside circle-stdlib
 
@@ -104,8 +108,8 @@ re-downloading Circle sources. BMX changes are then applied from
 | --- | --- |
 | Role | Bare-metal Raspberry Pi framework used by BMX |
 | Source path in archive | `circle-stdlib/libs/circle` |
-| Pi4 build path | `build/pi4/circle-stdlib/libs/circle` |
-| Pi5 build path | `build/pi5/circle-stdlib/libs/circle` |
+| Pi4 build path | `build/pi4/circle-variants/<profile>-<hash>/circle-stdlib/libs/circle` |
+| Pi5 build path | `build/pi5/circle-variants/<profile>-<hash>/circle-stdlib/libs/circle` |
 | Upstream URL | https://github.com/rsta2/circle |
 | Version/tag | `Step51` |
 | Commit | `6177984e30fac5e65582d171d43f1563368a94ac` |

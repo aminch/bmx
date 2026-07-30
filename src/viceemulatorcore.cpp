@@ -24,6 +24,10 @@
 
 #include "defs.h"
 
+#if defined(BMX_SID_WORKER) || defined(BMX_SID_DIAGNOSTICS)
+#include "sidworker.h"
+#endif
+
 extern "C" {
 #include "version.h"
 #include "third_party/common/semaphore.h"
@@ -176,6 +180,13 @@ void ViceEmulatorCore::Run(unsigned nCore) {
                      2, &sid_job_delta_t);
         sem_inc(&sid_done);
      }
+  }
+  #endif
+
+  #if defined(BMC64_USE_EMU_MULTICORE) && BMX_SID_WORKER && \
+      !defined(BMC64_USE_RESID_PRECOMPUTE)
+  if (nCore == 2) {
+    bmx_sid_worker_run();
   }
   #endif
 

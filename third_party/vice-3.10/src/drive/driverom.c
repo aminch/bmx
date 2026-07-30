@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "archdep.h"
 #include "drive.h"
 #include "drivetypes.h"
 #include "driverom.h"
@@ -80,8 +81,11 @@ int driverom_test_load(const char *resource_name, unsigned int *loaded,
                         unsigned int type, unsigned int *size)
 {
     const char *rom_name = NULL;
+    FILE *rom_file;
+    off_t file_size;
     int filesize;
-    unsigned int dnr;
+
+    (void)type;
 
     DBG(("driverom_test_load res:%s loaded:%u min:%d max:%d name:%s type:%u size:%u",
        resource_name, *loaded, min, max, name, type, size ? *size : 0));
@@ -101,9 +105,8 @@ int driverom_test_load(const char *resource_name, unsigned int *loaded,
         *loaded = 0;
     }
 
-    filesize = sysfile_locate(rom_name, "drives", NULL);
-
-    if (filesize < 0) {
+    rom_file = sysfile_open(rom_name, "drives", NULL, MODE_READ);
+    if (rom_file == NULL) {
 #if 1
         log_error(driverom_log, "%s ROM image not found. "
                   "Hardware-level %s emulation is not available.", name, name);
@@ -111,15 +114,31 @@ int driverom_test_load(const char *resource_name, unsigned int *loaded,
         goto exiterror;
     }
 
-    if ((min < max)) {
-        if ((filesize > max)) {
+    file_size = archdep_file_size(rom_file);
+    fclose(rom_file);
+    if (file_size < 0) {
 #if 1
-            log_error(driverom_log, "%s ROM image too large. "
-                    "Hardware-level %s emulation is not available.", name, name);
+        log_error(driverom_log, "Cannot determine %s ROM image size. "
+                  "Hardware-level %s emulation is not available.", name, name);
 #endif
-            goto exiterror;
-        }
+        goto exiterror;
     }
+
+    if (file_size < min) {
+#if 1
+        log_error(driverom_log, "%s ROM image too small. "
+                  "Hardware-level %s emulation is not available.", name, name);
+#endif
+        goto exiterror;
+    }
+    if (file_size > max) {
+#if 1
+        log_error(driverom_log, "%s ROM image too large. "
+                  "Hardware-level %s emulation is not available.", name, name);
+#endif
+        goto exiterror;
+    }
+    filesize = (int)file_size;
 
     if (loaded != NULL) {
         *loaded = 1;
@@ -130,18 +149,6 @@ int driverom_test_load(const char *resource_name, unsigned int *loaded,
     return 0;
 
 exiterror:
-#if 1
-    /* FIXME: this should probably no more happen here */
-    /* disable the drives that used the ROM which could not be loaded */
-    for (dnr = 0; dnr < NUM_DISK_UNITS; dnr++) {
-        diskunit_context_t *unit = diskunit_context[dnr];
-        if (unit->type == type) {
-            unit->type = DRIVE_TYPE_NONE;
-            drive_disable(diskunit_context[dnr]);
-            machine_bus_status_drivetype_set(dnr + 8, 0);
-        }
-    }
-#endif
     return -1;
 }
 

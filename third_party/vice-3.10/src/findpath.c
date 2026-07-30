@@ -164,6 +164,10 @@ char *findpath(const char *cmd, const char *syspath, const char *subpath, int mo
             l = s ? (int)(s - path) : (int)strlen(path);
 
             if (l + cl + spl > ARCHDEP_PATH_MAX - 5) {
+                if (s == NULL) {
+                    break;
+                }
+                path = s + 1;
                 continue;
             }
 

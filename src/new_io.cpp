@@ -12,6 +12,7 @@
 extern int errno;
 
 #include "circle_glue.h"
+#include "bmx_dirent_info.h"
 #include <assert.h>
 
 #include <malloc.h>
@@ -341,11 +342,19 @@ struct CircleDir {
     mEntry.d_name[0] = 0;
     dir.pat = pattern;
     in_use = 0;
+    last_entry = nullptr;
+    last_size = 0;
+    last_fat_attributes = 0;
+    last_info_valid = 0;
   }
 
   FATFS_DIR dir;
   int in_use;
   struct dirent mEntry;
+  const struct dirent *last_entry;
+  uint64_t last_size;
+  unsigned int last_fat_attributes;
+  int last_info_valid;
 };
 
 CircleFile fileTab[MAX_OPEN_FILES];
@@ -1054,6 +1063,8 @@ extern "C" DIR *BMX_NEW_IO_POSIX(opendir)(const char *name) {
   }
 
   slot.in_use = 1;
+  slot.last_entry = nullptr;
+  slot.last_info_valid = 0;
   return reinterpret_cast<DIR *>(&slot.dir);
 }
 
@@ -1064,10 +1075,17 @@ static struct dirent *do_readdir(CircleDir *dir, struct dirent *de) {
   FILINFO fno;
   struct dirent *result = nullptr;
 
+  dir->last_entry = nullptr;
+  dir->last_info_valid = 0;
+
   FRESULT res = f_findnext(&dir->dir, &fno);
   if (res == FR_OK && fno.fname[0] != 0) {
     snprintf(de->d_name, sizeof de->d_name, "%s", fno.fname);
     de->d_ino = (ino_t)(BMC64_DIRENT_FAT_ATTR_VALID | fno.fattrib);
+    dir->last_entry = de;
+    dir->last_size = static_cast<uint64_t>(fno.fsize);
+    dir->last_fat_attributes = fno.fattrib;
+    dir->last_info_valid = 1;
     result = de;
   }
 
@@ -1082,6 +1100,23 @@ extern "C" struct dirent *BMX_NEW_IO_POSIX(readdir)(DIR *dir) {
   }
 
   return do_readdir(c_dir, &c_dir->mEntry);
+}
+
+extern "C" int bmx_readdir_get_info(void *directory, const void *entry,
+                                      bmx_dirent_info_t *info) {
+  if (directory == nullptr || entry == nullptr || info == nullptr) {
+    return 0;
+  }
+
+  CircleDir *c_dir = FindCircleDirFromDIR(reinterpret_cast<DIR *>(directory));
+  if (c_dir == nullptr || !c_dir->last_info_valid ||
+      c_dir->last_entry != entry) {
+    return 0;
+  }
+
+  info->size = c_dir->last_size;
+  info->fat_attributes = c_dir->last_fat_attributes;
+  return 1;
 }
 
 extern "C" int BMX_NEW_IO_POSIX(readdir_r)(DIR *__restrict dir,
@@ -1105,6 +1140,8 @@ extern "C" void BMX_NEW_IO_POSIX(rewinddir)(DIR *dir) {
   CircleDir *c_dir = FindCircleDirFromDIR(dir);
   if (c_dir != nullptr) {
     f_rewinddir(&c_dir->dir);
+    c_dir->last_entry = nullptr;
+    c_dir->last_info_valid = 0;
   }
 }
 
@@ -1116,6 +1153,8 @@ extern "C" int BMX_NEW_IO_POSIX(closedir)(DIR *dir) {
   }
 
   c_dir->in_use = 0;
+  c_dir->last_entry = nullptr;
+  c_dir->last_info_valid = 0;
 
   if (f_closedir(&c_dir->dir) != FR_OK) {
     errno = EIO;

@@ -55,6 +55,13 @@
      _a > _b ? _a : _b; })
 
 #define MAX_USB_DEVICES 4
+#define BMX_USB_PRODUCT_STRING_SIZE 256
+
+enum bmx_sound_output {
+  BMX_SOUND_OUTPUT_NONE = 0,
+  BMX_SOUND_OUTPUT_HDMI,
+  BMX_SOUND_OUTPUT_USB
+};
 #define MAX_JOY_PORTS 4
 
 #define NUM_GPIO_PINS 23
@@ -381,7 +388,17 @@ extern void emu_set_gamepad_info(int num_pads,
                                  int axes[MAX_USB_DEVICES],
                                  int hats[MAX_USB_DEVICES],
                                  int known_mapping[MAX_USB_DEVICES],
-                                 int alternative_mapping[MAX_USB_DEVICES]);
+                                 int alternative_mapping[MAX_USB_DEVICES],
+                                 int present[MAX_USB_DEVICES],
+                                 const char product[MAX_USB_DEVICES]
+                                                   [BMX_USB_PRODUCT_STRING_SIZE]);
+
+// Tell the emulator which keyboard and sound output are currently active.
+extern void emu_set_keyboard_info(
+    int count,
+    const char product[MAX_USB_DEVICES][BMX_USB_PRODUCT_STRING_SIZE]);
+extern void emu_set_current_sound_output(enum bmx_sound_output output,
+                                         const char *usb_product);
 
 // Test whether emulator is in a config mode where it wants to receive
 // raw usb data.

@@ -45,6 +45,8 @@ int joy_num_axes[MAX_USB_DEVICES];
 int joy_num_hats[MAX_USB_DEVICES];
 int joy_known_mapping[MAX_USB_DEVICES];
 int joy_alternative_mapping[MAX_USB_DEVICES];
+int joy_present[MAX_USB_DEVICES];
+char joy_product[MAX_USB_DEVICES][BMX_USB_PRODUCT_STRING_SIZE];
 
 // Holds previous button states for the purpose of
 // reporting button functions press/release events.
@@ -440,7 +442,10 @@ void emu_set_gamepad_info(int num_pads,
                           int num_axes[MAX_USB_DEVICES],
                           int num_hats[MAX_USB_DEVICES],
                           int known_mapping[MAX_USB_DEVICES],
-                          int alternative_mapping[MAX_USB_DEVICES]) {
+                          int alternative_mapping[MAX_USB_DEVICES],
+                          int present[MAX_USB_DEVICES],
+                          const char product[MAX_USB_DEVICES]
+                                            [BMX_USB_PRODUCT_STRING_SIZE]) {
   joy_num_pads = MIN(num_pads , MAX_USB_DEVICES);
   for (int k = 0 ; k < MAX_USB_DEVICES; k++) {
     joy_num_axes[k] = MIN(num_axes[k] , MAX_USB_AXES);
@@ -448,6 +453,9 @@ void emu_set_gamepad_info(int num_pads,
     joy_num_buttons[k] = MIN(num_buttons[k] , MAX_USB_BUTTONS);
     joy_known_mapping[k] = known_mapping[k] != 0;
     joy_alternative_mapping[k] = alternative_mapping[k] != 0;
+    joy_present[k] = present[k] != 0;
+    strncpy(joy_product[k], product[k], BMX_USB_PRODUCT_STRING_SIZE - 1);
+    joy_product[k][BMX_USB_PRODUCT_STRING_SIZE - 1] = '\0';
   }
   menu_usb_gamepad_info_changed();
 }

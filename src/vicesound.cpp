@@ -148,6 +148,19 @@ boolean ViceSound::USBOutputAvailable(void) {
   return find_usb_output_device() != nullptr;
 }
 
+boolean ViceSound::GetUSBOutputProduct(char *buffer, unsigned buffer_size) {
+  CUSBAudioStreamingDevice *streaming_device = find_usb_output_device();
+  if (buffer != nullptr && buffer_size > 0) {
+    const char *product = streaming_device != nullptr
+                              ? streaming_device->GetProperty(
+                                    CDevice::PropertyProduct)
+                              : nullptr;
+    strncpy(buffer, product != nullptr ? product : "", buffer_size - 1U);
+    buffer[buffer_size - 1U] = '\0';
+  }
+  return streaming_device != nullptr;
+}
+
 ViceSound::ViceSound(CInterruptSystem *pInterrupt,
                      TVCHIQSoundDestination Destination,
                      unsigned SampleRate)
@@ -202,14 +215,26 @@ boolean ViceSound::Playback(int volume, int channels,
   mVolumePercent = clamp_percent(volume);
   mControlLock.Release();
 
-  if (priority == SOUND_OUTPUT_PRIORITY_USB_HDMI) {
+  boolean usb_output_available = USBOutputAvailable();
+  if (priority == SOUND_OUTPUT_PRIORITY_USB_HDMI && usb_output_available) {
     return StartUSB() || StartHDMI();
   }
-  return StartHDMI() || StartUSB();
+  if (StartHDMI()) {
+    return TRUE;
+  }
+  return usb_output_available && StartUSB();
 }
 
 boolean ViceSound::PlaybackActive(void) const {
   return mSoundDevice != nullptr && mSoundDevice->IsActive();
+}
+
+boolean ViceSound::HDMIOutputSelected(void) const {
+  return mSoundDevice != nullptr && mOutputDevice == OutputHDMI;
+}
+
+boolean ViceSound::USBOutputSelected(void) const {
+  return mSoundDevice != nullptr && mOutputDevice == OutputUSB;
 }
 
 void ViceSound::USBPlugAndPlayChanged(boolean usbOutputAvailable,

@@ -10,11 +10,18 @@ SD_LAYOUT_TOML ?= sd-layout.toml
 UPDATE_PATH_POLICY_GENERATOR ?= tools/generate_update_path_policy.py
 UPDATE_PATH_POLICY_MODULE ?= tools/update_path_policy.py
 UPDATE_PATH_POLICY_HEADER ?= $(SRC_DIR)/update/generated/update_path_policy_v1.h
-VICE ?= third_party/vice-3.10/src
-VICE_ARCH ?= $(VICE)/arch/raspi
-VICE_SHARED ?= $(VICE)/arch/shared
+VICE_SOURCE ?= third_party/vice-3.10/src
+# VICE points at generated build artifacts.  It may equal VICE_SOURCE for
+# legacy in-tree builds, but the normal BMX wrappers use an isolated
+# board/profile build tree.
+VICE ?= $(VICE_SOURCE)
+VICE_ARCH ?= $(VICE_SOURCE)/arch/raspi
+VICE_SHARED ?= $(VICE_SOURCE)/arch/shared
 VICE_INCLUDE_DIRS ?= \
 	$(VICE) \
+	$(VICE)/resid \
+	$(VICE)/resid-dtv \
+	$(VICE_SOURCE) \
 	$(VICE_ARCH) \
 	$(VICE_SHARED) \
 	$(VICE_SHARED)/hotkeys \
@@ -22,53 +29,53 @@ VICE_INCLUDE_DIRS ?= \
 	$(VICE_SHARED)/mididrv \
 	$(VICE_SHARED)/socketdrv \
 	$(VICE_SHARED)/sounddrv \
-	$(VICE)/drive \
-	$(VICE)/c64 \
-	$(VICE)/c64/cart \
-	$(VICE)/scpu64 \
-	$(VICE)/c64dtv \
-	$(VICE)/c128 \
-	$(VICE)/c128/cart \
-	$(VICE)/vic20 \
-	$(VICE)/pet \
-	$(VICE)/cbm2 \
-	$(VICE)/plus4 \
-	$(VICE)/raster \
-	$(VICE)/core \
-	$(VICE)/core/rtc \
-	$(VICE)/crtc \
-	$(VICE)/datasette \
-	$(VICE)/diskimage \
-	$(VICE)/drive/iec \
-	$(VICE)/drive/iec128dcr \
-	$(VICE)/drive/iec/c64exp \
-	$(VICE)/drive/iecieee \
-	$(VICE)/drive/ieee \
-	$(VICE)/drive/tcbm \
-	$(VICE)/fileio \
-	$(VICE)/fsdevice \
-	$(VICE)/iecbus \
-	$(VICE)/monitor \
-	$(VICE)/parallel \
-	$(VICE)/printerdrv \
-	$(VICE)/rs232drv \
-	$(VICE)/samplerdrv \
-	$(VICE)/serial \
-	$(VICE)/sid \
-	$(VICE)/tape \
-	$(VICE)/userport \
-	$(VICE)/vdrive \
-	$(VICE)/vicii \
-	$(VICE)/vdc \
-	$(VICE)/viciisc \
-	$(VICE)/video \
-	$(VICE)/lib/md5 \
-	$(VICE)/lib/p64 \
-	$(VICE)/platform \
-	$(VICE)/joyport \
-	$(VICE)/gfxoutputdrv \
-	$(VICE)/tapeport \
-	$(VICE)/imagecontents
+	$(VICE_SOURCE)/drive \
+	$(VICE_SOURCE)/c64 \
+	$(VICE_SOURCE)/c64/cart \
+	$(VICE_SOURCE)/scpu64 \
+	$(VICE_SOURCE)/c64dtv \
+	$(VICE_SOURCE)/c128 \
+	$(VICE_SOURCE)/c128/cart \
+	$(VICE_SOURCE)/vic20 \
+	$(VICE_SOURCE)/pet \
+	$(VICE_SOURCE)/cbm2 \
+	$(VICE_SOURCE)/plus4 \
+	$(VICE_SOURCE)/raster \
+	$(VICE_SOURCE)/core \
+	$(VICE_SOURCE)/core/rtc \
+	$(VICE_SOURCE)/crtc \
+	$(VICE_SOURCE)/datasette \
+	$(VICE_SOURCE)/diskimage \
+	$(VICE_SOURCE)/drive/iec \
+	$(VICE_SOURCE)/drive/iec128dcr \
+	$(VICE_SOURCE)/drive/iec/c64exp \
+	$(VICE_SOURCE)/drive/iecieee \
+	$(VICE_SOURCE)/drive/ieee \
+	$(VICE_SOURCE)/drive/tcbm \
+	$(VICE_SOURCE)/fileio \
+	$(VICE_SOURCE)/fsdevice \
+	$(VICE_SOURCE)/iecbus \
+	$(VICE_SOURCE)/monitor \
+	$(VICE_SOURCE)/parallel \
+	$(VICE_SOURCE)/printerdrv \
+	$(VICE_SOURCE)/rs232drv \
+	$(VICE_SOURCE)/samplerdrv \
+	$(VICE_SOURCE)/serial \
+	$(VICE_SOURCE)/sid \
+	$(VICE_SOURCE)/tape \
+	$(VICE_SOURCE)/userport \
+	$(VICE_SOURCE)/vdrive \
+	$(VICE_SOURCE)/vicii \
+	$(VICE_SOURCE)/vdc \
+	$(VICE_SOURCE)/viciisc \
+	$(VICE_SOURCE)/video \
+	$(VICE_SOURCE)/lib/md5 \
+	$(VICE_SOURCE)/lib/p64 \
+	$(VICE_SOURCE)/platform \
+	$(VICE_SOURCE)/joyport \
+	$(VICE_SOURCE)/gfxoutputdrv \
+	$(VICE_SOURCE)/tapeport \
+	$(VICE_SOURCE)/imagecontents
 
 -include $(CIRCLE_STDLIB_HOME)/Config.mk
 -include $(CIRCLEHOME)/Config.mk
@@ -76,6 +83,20 @@ NEWLIBDIR ?= $(CIRCLE_STDLIB_INSTALL_DIR)
 AARCH ?= 32
 
 BOARD ?= pi4
+
+ifeq ($(BOARD),pi5)
+BMX_PI5_SID_WORKER ?= 1
+else
+BMX_PI5_SID_WORKER ?= 0
+endif
+BMX_PI5_SID_DIAGNOSTICS ?= 0
+
+ifneq ($(filter-out 0 1,$(BMX_PI5_SID_WORKER)),)
+$(error BMX_PI5_SID_WORKER must be exactly 0 or 1)
+endif
+ifneq ($(filter-out 0 1,$(BMX_PI5_SID_DIAGNOSTICS)),)
+$(error BMX_PI5_SID_DIAGNOSTICS must be exactly 0 or 1)
+endif
 
 ifeq ($(BOARD),pi4)
 RASPPI := 4
@@ -87,10 +108,16 @@ endif
 
 BUILD_BOARD ?= $(if $(BOARD),$(BOARD),raspi$(RASPPI))
 BUILD_DIR ?= $(BUILD_ROOT)/$(BUILD_BOARD)/$(MACHINE_CLASS)
+BMX_COMMON_BUILD_DIR ?= $(BUILD_DIR)
+BMC64_COMMON_LIB ?= third_party/common/libbmc64common.a
+BMX_GENERATE_LISTING ?= 1
 
 ifeq ($(strip $(RASPPI)),4)
 ifneq ($(strip $(AARCH)),32)
 $(error Pi4 builds currently use 32-bit Circle only)
+endif
+ifneq ($(BMX_PI5_SID_WORKER)$(BMX_PI5_SID_DIAGNOSTICS),00)
+$(error Pi5 SID worker and diagnostics are not supported in Pi4 builds)
 endif
 TARGET_BASENAME ?= kernel7l
 C_STANDARD += -Wno-incompatible-pointer-types
@@ -132,14 +159,28 @@ BMC64_OBJS = main.o kernel.o viceoptions.o viceapp.o crt_pi_idx.o crt_pi_rgb.o \
              update/update_policy.o \
              update/update_service.o update/update_types.o \
              update/url_policy.o update/zip_reader.o
-OBJS = $(addprefix $(BUILD_DIR)/,$(BMC64_OBJS))
 
-MINIZ_TINFL_OBJ := $(BUILD_DIR)/update/miniz_tinfl.o
+# Only these translation units inspect the RASPI_<machine> preprocessor
+# define.  Everything else is built once per board/configuration and reused by
+# all machine kernels without changing the existing direct-object link order.
+BMC64_MACHINE_OBJS := kernel.o viceapp.o machines/machine_descriptor.o
+
+ifeq ($(RASPPI),5)
+ifneq ($(BMX_PI5_SID_WORKER)$(BMX_PI5_SID_DIAGNOSTICS),00)
+BMC64_OBJS += sidworker.o
+BMC64_MACHINE_OBJS += sidworker.o
+endif
+endif
+BMC64_COMMON_OBJS := $(filter-out $(BMC64_MACHINE_OBJS),$(BMC64_OBJS))
+OBJS = $(addprefix $(BMX_COMMON_BUILD_DIR)/,$(BMC64_COMMON_OBJS)) \
+	$(addprefix $(BUILD_DIR)/,$(BMC64_MACHINE_OBJS))
+
+MINIZ_TINFL_OBJ := $(BMX_COMMON_BUILD_DIR)/update/miniz_tinfl.o
 OBJS += $(MINIZ_TINFL_OBJ)
 
-OBJS	+= $(BUILD_DIR)/viceemulatorcore.o
-ifneq ($(wildcard $(VICE)/blockdev.h),)
-OBJS	+= $(BUILD_DIR)/vice_blockdev.o
+OBJS	+= $(BMX_COMMON_BUILD_DIR)/viceemulatorcore.o
+ifneq ($(wildcard $(VICE_SOURCE)/blockdev.h),)
+OBJS	+= $(BMX_COMMON_BUILD_DIR)/vice_blockdev.o
 endif
 ifeq ($(RASPPI),5)
 ifneq ($(wildcard $(VICE)/arch/shared/sounddrv/libsounddrv.a),)
@@ -151,19 +192,15 @@ endif
 endif
 
 ifeq ($(RASPPI),5)
-OBJS += $(BUILD_DIR)/fbl_pi5.o $(BUILD_DIR)/pi5_kms.o
+OBJS += $(BMX_COMMON_BUILD_DIR)/fbl_pi5.o $(BMX_COMMON_BUILD_DIR)/pi5_kms.o
 else
-OBJS += $(BUILD_DIR)/fbl.o
+OBJS += $(BMX_COMMON_BUILD_DIR)/fbl.o
 endif
 
-$(BUILD_DIR)/pi5_kms.o: $(SRC_DIR)/pi5kms/pi5_kms.cpp | $(BUILD_DIR)
+$(BMX_COMMON_BUILD_DIR)/pi5_kms.o: $(SRC_DIR)/pi5kms/pi5_kms.cpp | $(BMX_COMMON_BUILD_DIR)
 	@echo "  CPP   $@"
 	@mkdir -p $(dir $@)
-	@$(CPP) $(CPPFLAGS) -c -o $@ $<
-
-$(BUILD_DIR)/pi5_kms.d: $(SRC_DIR)/pi5kms/pi5_kms.cpp | $(BUILD_DIR)
-	@mkdir -p $(dir $@)
-	@$(CPP) $(CPPFLAGS) -M -MG -MT $(BUILD_DIR)/pi5_kms.o -MT $@ -MF $@ $<
+	@$(CPP) $(CPPFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -o $@ $<
 
 CFLAGS += -I $(SRC_DIR) -I . -I third_party/common -I "$(NEWLIBDIR)/include" -I $(STDDEF_INCPATH) \
           -I $(CIRCLE_STDLIB_HOME)/include \
@@ -172,8 +209,14 @@ CFLAGS += -I $(SRC_DIR) -I . -I third_party/common -I "$(NEWLIBDIR)/include" -I 
           -I $(CIRCLEHOME)/addon \
           $(addprefix -I ,$(wildcard $(VICE_INCLUDE_DIRS))) \
           -I $(CIRCLEHOME)/addon/fatfs \
-          -DRASPI_COMPILE \
-          -D $(MACHINE_CLASS)
+          -DRASPI_COMPILE
+
+ifeq ($(RASPPI),5)
+CFLAGS += -DBMX_SID_WORKER=$(BMX_PI5_SID_WORKER) \
+	-DBMX_SID_DIAGNOSTICS=$(BMX_PI5_SID_DIAGNOSTICS)
+CPPFLAGS += -DBMX_SID_WORKER=$(BMX_PI5_SID_WORKER) \
+	-DBMX_SID_DIAGNOSTICS=$(BMX_PI5_SID_DIAGNOSTICS)
+endif
 
 # Circle's freestanding operator new/new[] returns null on allocation failure.
 # GCC may otherwise assume throwing-new semantics and remove the explicit null
@@ -313,7 +356,7 @@ UPDATE_TLS_LIBS := \
         $(CIRCLE_STDLIB_HOME)/libs/mbedtls/library/libmbedcrypto.a
 
 LIBS := $(VICELIBS) \
-        third_party/common/libbmc64common.a \
+        $(BMC64_COMMON_LIB) \
         $(VICE)/imagecontents/libimagecontents.a \
         $(CIRCLEHOME)/addon/wlan/hostap/wpa_supplicant/libwpa_supplicant.a \
         $(CIRCLEHOME)/addon/wlan/libwlan.a \
@@ -331,7 +374,10 @@ LIBS += $(CIRCLEHOME)/addon/vc4/vchiq/libvchiq.a \
 	$(CIRCLEHOME)/addon/vc4/interface/vmcs_host/libvmcs_host.a
 endif
 
-EXTRACLEAN += $(OBJS) $(OBJS:.o=.d) \
+# A machine clean deliberately keeps shared BMX objects.  Use the wrapper's
+# explicit --clean operation to remove an entire board/configuration variant.
+EXTRACLEAN += $(addprefix $(BUILD_DIR)/,$(BMC64_MACHINE_OBJS)) \
+              $(addprefix $(BUILD_DIR)/,$(BMC64_MACHINE_OBJS:.o=.d)) \
               $(TARGET).elf $(TARGET).lst $(TARGET).img $(TARGET).hex $(TARGET).cir $(TARGET).map
 
 .PHONY: update-path-policy update-path-policy-check
@@ -352,46 +398,64 @@ update-path-policy-check:
 # Circle's Rules.mk does not include this project's generated .d files.  Keep
 # the header as an explicit prerequisite, and run the non-mutating consistency
 # check even when the object itself is already current.
-$(BUILD_DIR)/platform/platform.o \
-		$(BUILD_DIR)/update/release_manifest.o: \
+$(BMX_COMMON_BUILD_DIR)/platform/platform.o \
+		$(BMX_COMMON_BUILD_DIR)/update/release_manifest.o: \
 		$(UPDATE_PATH_POLICY_GENERATOR) $(UPDATE_PATH_POLICY_MODULE) \
 		$(UPDATE_PATH_POLICY_HEADER) | update-path-policy-check
 
 $(BUILD_DIR):
 	@mkdir -p $@
 
+$(BMX_COMMON_BUILD_DIR):
+	@mkdir -p $@
+
+ifneq ($(strip $(BMX_CONFIG_STAMP)),)
+$(OBJS): $(BMX_CONFIG_STAMP)
+endif
+
+$(addprefix $(BUILD_DIR)/,$(BMC64_MACHINE_OBJS)): CFLAGS += -D$(MACHINE_CLASS)
+$(addprefix $(BUILD_DIR)/,$(BMC64_MACHINE_OBJS)): CPPFLAGS += -D$(MACHINE_CLASS)
+
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.S | $(BUILD_DIR)
 	@echo "  AS    $@"
 	@mkdir -p $(dir $@)
-	@$(AS) $(AFLAGS) -c -o $@ $<
+	@$(AS) $(AFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -o $@ $<
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	@echo "  CC    $@"
 	@mkdir -p $(dir $@)
-	@$(CC) $(CFLAGS) $(C_STANDARD) -c -o $@ $<
+	@$(CC) $(CFLAGS) $(C_STANDARD) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -o $@ $<
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
 	@echo "  CPP   $@"
 	@mkdir -p $(dir $@)
-	@$(CPP) $(CPPFLAGS) -c -o $@ $<
+	@$(CPP) $(CPPFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -o $@ $<
 
-$(MINIZ_TINFL_OBJ): third_party/miniz/miniz_tinfl.c \
-		third_party/miniz/miniz.c third_party/miniz/miniz.h | $(BUILD_DIR)
+ifneq ($(abspath $(BMX_COMMON_BUILD_DIR)),$(abspath $(BUILD_DIR)))
+$(BMX_COMMON_BUILD_DIR)/%.o: $(SRC_DIR)/%.S | $(BMX_COMMON_BUILD_DIR)
+	@echo "  AS    $@"
+	@mkdir -p $(dir $@)
+	@$(AS) $(AFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -o $@ $<
+
+$(BMX_COMMON_BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BMX_COMMON_BUILD_DIR)
 	@echo "  CC    $@"
 	@mkdir -p $(dir $@)
-	@$(CC) $(CFLAGS) $(C_STANDARD) -I third_party/miniz -c -o $@ $<
+	@$(CC) $(CFLAGS) $(C_STANDARD) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -o $@ $<
 
-$(BUILD_DIR)/%.d: $(SRC_DIR)/%.S | $(BUILD_DIR)
+$(BMX_COMMON_BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BMX_COMMON_BUILD_DIR)
+	@echo "  CPP   $@"
 	@mkdir -p $(dir $@)
-	@$(AS) $(AFLAGS) -M -MG -MT $(BUILD_DIR)/$*.o -MT $@ -MF $@ $<
+	@$(CPP) $(CPPFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c -o $@ $<
+endif
 
-$(BUILD_DIR)/%.d: $(SRC_DIR)/%.c | $(BUILD_DIR)
+$(MINIZ_TINFL_OBJ): third_party/miniz/miniz_tinfl.c \
+		third_party/miniz/miniz.c third_party/miniz/miniz.h | $(BMX_COMMON_BUILD_DIR)
+	@echo "  CC    $@"
 	@mkdir -p $(dir $@)
-	@$(CC) $(CFLAGS) -M -MG -MT $(BUILD_DIR)/$*.o -MT $@ -MF $@ $<
+	@$(CC) $(CFLAGS) $(C_STANDARD) -I third_party/miniz \
+		-MMD -MP -MF $(@:.o=.d) -MT $@ -c -o $@ $<
 
-$(BUILD_DIR)/%.d: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
-	@mkdir -p $(dir $@)
-	@$(CPP) $(CPPFLAGS) -M -MG -MT $(BUILD_DIR)/$*.o -MT $@ -MF $@ $<
+-include $(OBJS:.o=.d)
 
 # Policy maintenance must work in a fresh source checkout before the pinned
 # Circle tree has been extracted.  Every kernel/build goal still requires the
@@ -403,4 +467,11 @@ include $(CIRCLEHOME)/Rules.mk
 endif
 else
 include $(CIRCLEHOME)/Rules.mk
+endif
+
+ifeq ($(strip $(BMX_GENERATE_LISTING)),0)
+# Circle's link recipe always emits a listing.  Keep the expected empty file
+# but skip the expensive full-kernel disassembly for normal developer builds.
+override OBJDUMP := true
+override CPPFILT := cat
 endif

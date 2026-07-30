@@ -272,7 +272,6 @@ int archdep_remove(const char *path) { return remove(path); }
 int archdep_stat(const char *file_name, size_t *len,
                  unsigned int *isdir) {
   struct stat st;
-  int fn_len;
 
   // The consequence of having to yield to let some fake kernel threads
   // run is troublesome.  When the emulated machine calls into us for
@@ -285,9 +284,7 @@ int archdep_stat(const char *file_name, size_t *len,
   circle_yield();
 
   if (file_name == NULL) {
-    *len = 0;
-    *isdir = 0;
-    return -1;
+    goto fail;
   }
 
   // We can ignore these system files
@@ -299,13 +296,25 @@ int archdep_stat(const char *file_name, size_t *len,
       strcasecmp("./bootstat.txt", file_name) == 0 ||
       strcasecmp("./bootcode.bin", file_name) == 0 ||
       strcasecmp("./start.elf", file_name) == 0) {
-    return -1;
+    goto fail;
   }
 
   if (stat(file_name, &st) == 0) {
-    *len = st.st_size;
-    *isdir = S_ISDIR(st.st_mode);
+    if (len != NULL) {
+      *len = st.st_size;
+    }
+    if (isdir != NULL) {
+      *isdir = S_ISDIR(st.st_mode);
+    }
     return 0;
+  }
+
+fail:
+  if (len != NULL) {
+    *len = (size_t)-1;
+  }
+  if (isdir != NULL) {
+    *isdir = 0;
   }
   return -1;
 }

@@ -1167,6 +1167,44 @@ struct menu_item *ui_menu_add_button_with_value(int id,
   return new_item;
 }
 
+void ui_menu_set_button_value_fitted(struct menu_item *item,
+                                     const char *value, int indent) {
+  size_t available;
+  size_t value_len;
+  size_t menu_chars;
+  size_t label_end;
+
+  if (item == NULL || item->type != BUTTON) {
+    return;
+  }
+  if (value == NULL) {
+    value = "";
+  }
+
+  strncpy(item->str_value, value, MAX_STR_VAL_LEN - 1);
+  item->str_value[MAX_STR_VAL_LEN - 1] = '\0';
+  item->prefer_str = 1;
+
+  menu_chars = item->menu_width > 0 ? (size_t)item->menu_width / 8U : 0U;
+  label_end = (size_t)(indent >= 0 ? indent : 0) + 1U + strlen(item->name);
+  available = menu_chars > label_end + 2U ? menu_chars - label_end - 2U : 0U;
+  if (available >= MAX_DSP_VAL_LEN) {
+    available = MAX_DSP_VAL_LEN - 1U;
+  }
+
+  value_len = strlen(item->str_value);
+  if (value_len <= available) {
+    memcpy(item->displayed_value, item->str_value, value_len + 1U);
+  } else if (available >= 4U) {
+    memcpy(item->displayed_value, item->str_value, available - 3U);
+    memcpy(item->displayed_value + available - 3U, "...", 4U);
+  } else {
+    size_t dots = available < 3U ? available : 3U;
+    memset(item->displayed_value, '.', dots);
+    item->displayed_value[dots] = '\0';
+  }
+}
+
 struct menu_item *ui_menu_add_range(int id, struct menu_item *folder,
                                     char *name, int min, int max, int step,
                                     int initial_value) {
@@ -1226,6 +1264,11 @@ void ui_menu_set_text_field_display(struct menu_item *item, int width_chars,
 static void ui_render_children(struct menu_item *node,
                                int stack_index, int *index, int indent) {
   while (node != NULL) {
+    if (node->hidden) {
+      node->render_index = -1;
+      node = node->next;
+      continue;
+    }
     node->render_index = *index;
 
     int colour = node->disabled ? DISABLED_COLOR : FG_COLOR;
@@ -1528,6 +1571,11 @@ void ui_render_now(int menu_stack_index) {
 // account all items that have been expanded/contracted.
 static void ui_traverse_children(struct menu_item *node, int *index) {
   while (node != NULL) {
+    if (node->hidden) {
+      node->render_index = -1;
+      node = node->next;
+      continue;
+    }
     node->render_index = *index;
 
     if (*index >= menu_window_top[current_menu] &&

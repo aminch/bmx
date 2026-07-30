@@ -63,7 +63,7 @@ rawfile_info_t *rawfile_open(const char *file_name, const char *path,
     char *complete;
     FILE *fd;
     const char *mode = NULL;
-    unsigned int isdir;
+    unsigned int isdir = 0;
     size_t len;
 
     if (path == NULL) {
@@ -75,6 +75,7 @@ rawfile_info_t *rawfile_open(const char *file_name, const char *path,
     switch (command) {
         case FILEIO_COMMAND_STAT:
         case FILEIO_COMMAND_READ:
+        case FILEIO_COMMAND_DIRECTORY:
             mode = MODE_READ;
             break;
         case FILEIO_COMMAND_READ_WRITE:
@@ -94,7 +95,9 @@ rawfile_info_t *rawfile_open(const char *file_name, const char *path,
             return NULL;
     }
 
-    if (archdep_stat(complete, &len, &isdir) != 0) {
+    if (command == FILEIO_COMMAND_DIRECTORY) {
+        /* The caller owns metadata from the directory scan already. */
+    } else if (archdep_stat(complete, &len, &isdir) != 0) {
         /* if stat failed exit early, except in write mode
            (since opening a non existing file creates a new file) */
         if (command != FILEIO_COMMAND_WRITE &&

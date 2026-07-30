@@ -50,6 +50,8 @@ extern int joy_num_hats[MAX_USB_DEVICES];
 extern int joy_num_buttons[MAX_USB_DEVICES];
 extern int joy_known_mapping[MAX_USB_DEVICES];
 extern int joy_alternative_mapping[MAX_USB_DEVICES];
+extern int joy_present[MAX_USB_DEVICES];
+extern char joy_product[MAX_USB_DEVICES][BMX_USB_PRODUCT_STRING_SIZE];
 extern unsigned joy_prev_buttons[MAX_USB_DEVICES];
 
 int joy_key_up(unsigned int device, int key);

@@ -55,6 +55,7 @@
 #include "joyport/joyport_io_sim.h"
 #include "joyport/joystick.h"
 #include "keymap.h"
+#include "lib.h"
 #include "vdrive-internal.h"
 #include "tape.h"
 #include "sid.h"
@@ -258,7 +259,16 @@ void emu_machine_init(int raster_skip_enabled, int raster_skip2_enabled) {
 }
 
 int emu_set_sound_sample_rate(int sample_rate) {
-  return resources_set_int("SoundSampleRate", sample_rate);
+  int result = resources_set_int("SoundSampleRate", sample_rate);
+
+  /* The bare-metal menu pauses the normal VSync loop, which otherwise
+     consumes sound_state_changed in sound_flush().  Flush synchronously
+     while the menu is open so hotplug can reopen and publish the selected
+     output before the next menu frame. */
+  if (result == 0 && emu_is_ui_activated()) {
+    sound_flush();
+  }
+  return result;
 }
 
 static int user_pos_keymap_is(const char *expected) {
@@ -1400,56 +1410,64 @@ void emux_set_warp(int warp) {
   vsync_set_warp_mode(warp);
 }
 
-void emux_handle_rom_change(struct menu_item* item, fullpath_func f_fullpath) {
+static int set_rom_resource_transactional(const char *resource_name,
+                                          const char *new_value) {
+  const char *old_value = NULL;
+  char *old_copy;
+  int result;
+
+  if (resources_get_string(resource_name, &old_value) < 0 ||
+      old_value == NULL) {
+    return -1;
+  }
+
+  old_copy = lib_strdup(old_value);
+  result = resources_set_string(resource_name, new_value);
+  if (result != 0) {
+    (void)resources_set_string(resource_name, old_copy);
+  }
+  lib_free(old_copy);
+  return result;
+}
+
+int emux_handle_rom_change(struct menu_item* item, fullpath_func f_fullpath) {
+  (void)f_fullpath;
+
   // Make the rom change. These can't be fullpath or VICE complains.
   switch (item->id) {
      case MENU_DRIVE_ROM_FILE_1541:
-       resources_set_string("DosName1541", item->str_value);
-       return;
+       return set_rom_resource_transactional("DosName1541", item->str_value);
      case MENU_DRIVE_ROM_FILE_1541II:
-       resources_set_string("DosName1541ii", item->str_value);
-       return;
+       return set_rom_resource_transactional("DosName1541ii", item->str_value);
      case MENU_DRIVE_ROM_FILE_1551:
-       resources_set_string("DosName1551", item->str_value);
-       return;
+       return set_rom_resource_transactional("DosName1551", item->str_value);
      case MENU_DRIVE_ROM_FILE_1571:
-       resources_set_string("DosName1571", item->str_value);
-       return;
+       return set_rom_resource_transactional("DosName1571", item->str_value);
      case MENU_DRIVE_ROM_FILE_1581:
-       resources_set_string("DosName1581", item->str_value);
-       return;
+       return set_rom_resource_transactional("DosName1581", item->str_value);
      case MENU_DRIVE_ROM_FILE_CMDHD:
-       resources_set_string("DosNameCMDHD", item->str_value);
-       return;
+       return set_rom_resource_transactional("DosNameCMDHD", item->str_value);
      case MENU_KERNAL_FILE:
-       resources_set_string("KernalName", item->str_value);
-       return;
+       return set_rom_resource_transactional("KernalName", item->str_value);
      case MENU_BASIC_FILE:
-       resources_set_string("BasicName", item->str_value);
-       return;
+       return set_rom_resource_transactional("BasicName", item->str_value);
      case MENU_CHARGEN_FILE:
-       resources_set_string("ChargenName", item->str_value);
-       return;
+       return set_rom_resource_transactional("ChargenName", item->str_value);
      case MENU_C128_LOAD_KERNAL_FILE:
-       resources_set_string("KernalIntName", item->str_value);
-       return;
+       return set_rom_resource_transactional("KernalIntName", item->str_value);
      case MENU_C128_LOAD_BASIC_HI_FILE:
-       resources_set_string("BasicHiName", item->str_value);
-       return;
+       return set_rom_resource_transactional("BasicHiName", item->str_value);
      case MENU_C128_LOAD_BASIC_LO_FILE:
-       resources_set_string("BasicLoName", item->str_value);
-       return;
+       return set_rom_resource_transactional("BasicLoName", item->str_value);
      case MENU_C128_LOAD_CHARGEN_FILE:
-       resources_set_string("ChargenIntName", item->str_value);
-       return;
+       return set_rom_resource_transactional("ChargenIntName", item->str_value);
      case MENU_C128_LOAD_64_KERNAL_FILE:
-       resources_set_string("Kernal64Name", item->str_value);
-       return;
+       return set_rom_resource_transactional("Kernal64Name", item->str_value);
      case MENU_C128_LOAD_64_BASIC_FILE:
-       resources_set_string("Basic64Name", item->str_value);
-       return;
+       return set_rom_resource_transactional("Basic64Name", item->str_value);
      default:
        assert(0);
+       return -1;
   }
 }
 

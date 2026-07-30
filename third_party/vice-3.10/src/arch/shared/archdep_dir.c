@@ -47,6 +47,11 @@
 
 #include "archdep_dir.h"
 
+#ifdef RASPI_COMPILE
+# include "bmx_dirent_info.h"
+# include "circle.h"
+#endif
+
 
 /** \brief  Initial size of an array of file/directory entries
  *
@@ -68,7 +73,10 @@
  */
 static int compare_names(const void *a, const void *b)
 {
-    return strcmp(*(const char **)a, *(const char **)b);
+    const archdep_dir_entry_t *entry_a = a;
+    const archdep_dir_entry_t *entry_b = b;
+
+    return strcmp(entry_a->name, entry_b->name);
 }
 
 
@@ -103,14 +111,33 @@ static bool must_show_dotfile(const char *name, int mode)
  * \param[in]   dir     directory object
  * \param[in]   path    dirname to add
  */
-static void add_dir_entry(archdep_dir_t *dir, const char *path)
+static void set_entry(archdep_dir_entry_t *entry, const char *path,
+                      const archdep_dir_entry_info_t *info)
+{
+    entry->name = lib_strdup(path);
+    if (info != NULL) {
+        entry->size = info->size;
+        entry->is_directory = info->is_directory;
+        entry->is_read_only = info->is_read_only;
+        entry->metadata_valid = 1;
+    } else {
+        entry->size = 0;
+        entry->is_directory = 0;
+        entry->is_read_only = 0;
+        entry->metadata_valid = 0;
+    }
+}
+
+
+static void add_dir_entry(archdep_dir_t *dir, const char *path,
+                          const archdep_dir_entry_info_t *info)
 {
     if (dir->dir_amount == dir->dirs_size) {
         /* double array size */
         dir->dirs_size *= 2;
         dir->dirs = lib_realloc(dir->dirs, dir->dirs_size * sizeof *(dir->dirs));
     }
-    dir->dirs[dir->dir_amount++] = lib_strdup(path);
+    set_entry(&dir->dirs[dir->dir_amount++], path, info);
 }
 
 
@@ -121,14 +148,15 @@ static void add_dir_entry(archdep_dir_t *dir, const char *path)
  * \param[in]   dir     directory object
  * \param[in]   path    filename to add
  */
-static void add_file_entry(archdep_dir_t *dir, const char *path)
+static void add_file_entry(archdep_dir_t *dir, const char *path,
+                           const archdep_dir_entry_info_t *info)
 {
     if (dir->file_amount == dir->files_size) {
         /* double array size */
         dir->files_size *= 2;
         dir->files = lib_realloc(dir->files, dir->files_size * sizeof *(dir->files));
     }
-    dir->files[dir->file_amount++] = lib_strdup(path);
+    set_entry(&dir->files[dir->file_amount++], path, info);
 }
 
 
@@ -159,19 +187,47 @@ static bool scan_directory(archdep_dir_t *dir, const char *path, int mode)
     dp = readdir(dirp);
 
     while (dp != NULL) {
+        archdep_dir_entry_info_t entry_info;
+        const archdep_dir_entry_info_t *entry_info_ptr = NULL;
+
+#ifdef RASPI_COMPILE
+        bmx_dirent_info_t bmx_info;
+
+        if (bmx_readdir_get_info(dirp, dp, &bmx_info)) {
+            entry_info.size = (size_t)bmx_info.size;
+            entry_info.is_directory =
+                (bmx_info.fat_attributes & BMX_DIRENT_FAT_ATTR_DIRECTORY) != 0;
+            entry_info.is_read_only =
+                (bmx_info.fat_attributes & BMX_DIRENT_FAT_ATTR_READ_ONLY) != 0;
+            entry_info_ptr = &entry_info;
+        }
+
+        /* A large directory scan must not starve Circle's audio tasks. */
+        circle_yield();
+#endif
+
         if (must_show_dotfile(dp->d_name, mode)) {
+            if (entry_info_ptr != NULL) {
+                if (entry_info.is_directory) {
+                    add_dir_entry(dir, dp->d_name, entry_info_ptr);
+                } else {
+                    add_file_entry(dir, dp->d_name, entry_info_ptr);
+                }
+                dp = readdir(dirp);
+                continue;
+            }
 #ifdef _DIRENT_HAVE_D_TYPE
             if (dp->d_type != DT_UNKNOWN) {
                 if (dp->d_type == DT_DIR) {
-                    add_dir_entry(dir, dp->d_name);
+                    add_dir_entry(dir, dp->d_name, NULL);
 #ifdef DT_LNK
                 } else if (dp->d_type == DT_LNK) {
                     filename = util_concat(path, ARCHDEP_DIR_SEP_STR, dp->d_name, NULL);
                     if (archdep_stat(filename, &len, &isdir) == 0) {
                         if (isdir) {
-                            add_dir_entry(dir, dp->d_name);
+                            add_dir_entry(dir, dp->d_name, NULL);
                         } else {
-                            add_file_entry(dir, dp->d_name);
+                            add_file_entry(dir, dp->d_name, NULL);
                         }
                     }
                     if (filename) {
@@ -180,7 +236,7 @@ static bool scan_directory(archdep_dir_t *dir, const char *path, int mode)
                     }
 #endif /* DT_LNK */
                 } else {
-                    add_file_entry(dir, dp->d_name);
+                    add_file_entry(dir, dp->d_name, NULL);
                 }
                 dp = readdir(dirp);
             } else {
@@ -188,9 +244,9 @@ static bool scan_directory(archdep_dir_t *dir, const char *path, int mode)
                 filename = util_concat(path, ARCHDEP_DIR_SEP_STR, dp->d_name, NULL);
                 if (archdep_stat(filename, &len, &isdir) == 0) {
                     if (isdir) {
-                        add_dir_entry(dir, dp->d_name);
+                        add_dir_entry(dir, dp->d_name, NULL);
                     } else {
-                        add_file_entry(dir, dp->d_name);
+                        add_file_entry(dir, dp->d_name, NULL);
                     }
                 }
                 dp = readdir(dirp);
@@ -225,9 +281,9 @@ static bool scan_directory(archdep_dir_t *dir, const char *path, int mode)
         }
 
         if (ffdata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            add_dir_entry(dir, ffdata.cFileName);
+            add_dir_entry(dir, ffdata.cFileName, NULL);
         } else {
-            add_file_entry(dir, ffdata.cFileName);
+            add_file_entry(dir, ffdata.cFileName, NULL);
         }
     } while (FindNextFile(ffhandle, &ffdata));
 
@@ -287,13 +343,43 @@ const char *archdep_readdir(archdep_dir_t *dir)
     int pos = dir->pos;
 
     if (pos >= 0 && pos < dir_amount) {
-        retval = dir->dirs[pos];
+        retval = dir->dirs[pos].name;
         dir->pos++;
     } else if (pos >= dir_amount && pos < (dir_amount + file_amount)) {
-        retval = dir->files[pos - dir_amount];
+        retval = dir->files[pos - dir_amount].name;
         dir->pos++;
     }
     return retval;
+}
+
+
+int archdep_readdir_get_info(const archdep_dir_t *dir,
+                             archdep_dir_entry_info_t *info)
+{
+    const archdep_dir_entry_t *entry;
+    int pos;
+
+    if (dir == NULL || info == NULL || dir->pos <= 0) {
+        return -1;
+    }
+
+    pos = dir->pos - 1;
+    if (pos < dir->dir_amount) {
+        entry = &dir->dirs[pos];
+    } else if (pos < dir->dir_amount + dir->file_amount) {
+        entry = &dir->files[pos - dir->dir_amount];
+    } else {
+        return -1;
+    }
+
+    if (!entry->metadata_valid) {
+        return -1;
+    }
+
+    info->size = entry->size;
+    info->is_directory = entry->is_directory;
+    info->is_read_only = entry->is_read_only;
+    return 0;
 }
 
 
@@ -309,10 +395,10 @@ void archdep_closedir(archdep_dir_t *dir)
     int i;
 
     for (i = 0; i < dir->dir_amount; i++) {
-        lib_free(dir->dirs[i]);
+        lib_free(dir->dirs[i].name);
     }
     for (i = 0; i < dir->file_amount; i++) {
-        lib_free(dir->files[i]);
+        lib_free(dir->files[i].name);
     }
     lib_free(dir->dirs);
     lib_free(dir->files);
@@ -370,7 +456,7 @@ int archdep_telldir(const archdep_dir_t *dir)
 const char *archdep_readdir_get_dir(const archdep_dir_t *dir, int pos)
 {
     if (pos >= 0 && pos < dir->dir_amount) {
-        return dir->dirs[pos];
+        return dir->dirs[pos].name;
     }
     return NULL;
 }
@@ -386,7 +472,7 @@ const char *archdep_readdir_get_dir(const archdep_dir_t *dir, int pos)
 const char *archdep_readdir_get_file(const archdep_dir_t *dir, int pos)
 {
     if (pos >= 0 && pos < dir->file_amount) {
-        return dir->files[pos];
+        return dir->files[pos].name;
     }
     return NULL;
 }

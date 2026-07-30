@@ -19,13 +19,15 @@ The archive contains:
 - initialized submodules, including Circle `Step51`
 - no `.git` directories
 
-Build scripts extract this single archive into:
+Build scripts extract this single archive into configuration-keyed trees:
 
-- `build/pi4/circle-stdlib`
-- `build/pi5/circle-stdlib`
+- `build/pi4/circle-variants/<profile>-<hash>/circle-stdlib`
+- `build/pi5/circle-variants/<profile>-<hash>/circle-stdlib`
 
 The extracted trees are separate because Pi4 and Pi5 use different Circle
-configuration, toolchains and install directories.
+configuration, toolchains and install directories. The shorter
+`build/<board>/circle-stdlib` path is maintained as a convenience symlink to
+the last completed configuration when that path is not already a real tree.
 
 ## Mbed TLS
 

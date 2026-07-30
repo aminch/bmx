@@ -122,6 +122,45 @@ For Raspberry Pi 5 boards, staging also adds `gpiofanpin=45` to `cmdline.txt`
 so the Raspberry Pi 5 case fan / Active Cooler can be driven by Circle's CPU
 throttling support.
 
+## Incremental Target Builds
+
+The Pi4 and Pi5 wrappers keep separate, configuration-fingerprinted build
+caches below `BMC64_BUILD_ROOT/<board>/variants/`. VICE is configured out of
+tree; its components and `third_party/common` are reusable static archives.
+Shared BMX sources remain direct link objects in one per-configuration object
+pool, while the three machine-dependent BMX sources (plus Pi5 `sidworker.cpp`)
+are compiled per machine. A normal repeated invocation therefore asks Make to
+rebuild only out-of-date objects and relinks only the affected kernels.
+
+Circle/Newlib has its own, more stable cache below
+`BMC64_BUILD_ROOT/<board>/circle-variants/<profile>-<hash>/circle-stdlib` and
+is reconfigured only when its toolchain, configuration, source archive or
+patch set changes. On fresh build roots, the historical
+`BMC64_BUILD_ROOT/<board>/circle-stdlib` path is a convenience symlink to the
+last completed Circle configuration for patch and diagnostic tools; target
+builds never depend on that mutable alias. Pi4 and Pi5 no longer share
+generated VICE state, so independent board builds may run concurrently.
+
+For a faster edit/build cycle, build one or more machine kernels without
+staging:
+
+```sh
+tools/pi5/build_pi5.sh --build-only --machine c64sc
+tools/pi4/build_pi4.sh --build-only --machine c64 --machine c128 --jobs 8
+```
+
+`--machine` is repeatable and requires `--build-only`, because a partial
+kernel set must never be passed to staging. `--jobs N` limits parallel Make
+jobs. Full disassembly listings are disabled by default; enable them only when
+needed with `--listing` (or explicitly select the default with `--no-listing`).
+Use `--clean` to discard the selected VICE/BMX configuration cache before
+rebuilding; the matching Circle/Newlib cache is retained. Ordinary source
+changes do not require a clean build.
+
+The final kernel paths remain the stable `vice310-images` paths listed above,
+so staging, the release TUI and `release_public.sh prepare` use the incremental
+build caches without a different hand-off contract.
+
 ## Staging Profiles
 
 The Pi4 and Pi5 staging scripts support two boot config profiles:
@@ -177,3 +216,4 @@ The build, stage and install scripts share this path contract:
 | `PI5_STAGE_DIR` | Pi5-specific stage directory override |
 | `BMC64_KERNEL_DIR` | Stage input override for prebuilt kernels |
 | `BMC64_BUILD_PROFILE` | Boot config profile for staging, `release` or `debug` |
+| `BMC64_BUILD_VARIANT` | Optional safe name for a target-build cache variant |

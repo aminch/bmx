@@ -8,10 +8,14 @@ STAGE_ARGS=()
 BUILD_PROFILE="${BMC64_BUILD_PROFILE:-release}"
 BUILD_ONLY=0
 STAGE_DIR_SET=0
+BUILD_MACHINES=()
+BUILD_JOBS="${BMX_BUILD_JOBS:-$(nproc)}"
+GENERATE_LISTING="${BMX_GENERATE_LISTING:-0}"
+CLEAN_BUILD=0
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--profile release|debug] [--debug-uart] [--build-only] [--stage-dir DIR]
+Usage: $(basename "$0") [OPTIONS]
 
 Builds Pi4/Pi400 VICE 3.10 kernels and stages a boot tree.
 
@@ -20,6 +24,11 @@ Options:
   --debug-uart   alias for --profile debug
   --build-only   build kernels without creating an SD-card stage
   --stage-dir    override the output staging directory
+  --machine      build one machine (repeatable; requires --build-only)
+  --jobs         maximum parallel compiler jobs (default: host CPU count)
+  --listing      generate full kernel disassembly listings
+  --no-listing   skip disassembly listings (default)
+  --clean        discard the selected configuration cache before building
 EOF
 }
 
@@ -50,6 +59,34 @@ while (($# > 0)); do
       BUILD_ONLY=1
       shift
       ;;
+    --machine)
+      if [ -z "${2:-}" ]; then
+        echo "--machine requires a machine name" >&2
+        exit 1
+      fi
+      BUILD_MACHINES+=("$2")
+      shift 2
+      ;;
+    --jobs)
+      if [ -z "${2:-}" ]; then
+        echo "--jobs requires a positive integer" >&2
+        exit 1
+      fi
+      BUILD_JOBS="$2"
+      shift 2
+      ;;
+    --listing)
+      GENERATE_LISTING=1
+      shift
+      ;;
+    --no-listing)
+      GENERATE_LISTING=0
+      shift
+      ;;
+    --clean)
+      CLEAN_BUILD=1
+      shift
+      ;;
     --stage-dir)
       if [ -z "${2:-}" ]; then
         echo "--stage-dir requires a directory" >&2
@@ -75,9 +112,18 @@ if [ "$BUILD_ONLY" -eq 1 ] && [ "$STAGE_DIR_SET" -eq 1 ]; then
   echo "--build-only cannot be combined with --stage-dir" >&2
   exit 1
 fi
+if [ "${#BUILD_MACHINES[@]}" -gt 0 ] && [ "$BUILD_ONLY" -ne 1 ]; then
+  echo "--machine requires --build-only so staging cannot mix partial kernel sets" >&2
+  exit 1
+fi
+case "$BUILD_JOBS" in
+  ''|*[!0-9]*|0) echo "--jobs requires a positive integer" >&2; exit 1 ;;
+esac
 
-. "$SRC_DIR/tools/lib/serialize_vice_target_build.sh"
-bmx_acquire_vice_target_build_lock
+export BMC64_BUILD_PROFILE="$BUILD_PROFILE"
+export BMX_BUILD_JOBS="$BUILD_JOBS"
+export BMX_GENERATE_LISTING="$GENERATE_LISTING"
+export BMX_BUILD_CLEAN="$CLEAN_BUILD"
 
 cat <<'EOF'
 Building Pi4/Pi400 VICE 3.10 kernels with pinned Mbed TLS support.
@@ -87,7 +133,6 @@ EOF
 
 . "$SRC_DIR/tools/pi4/vice310_build_common.sh"
 
-export BMC64_BUILD_PROFILE="$BUILD_PROFILE"
 BMX_PI4_MACHINE_LIST="$(
   python3 "$SRC_DIR/tools/sd_layout.py" kernel-machines --board pi4
 )"
@@ -96,6 +141,15 @@ BMX_PI4_MACHINE_LIST="$(
   exit 1
 }
 mapfile -t BMX_PI4_MACHINES <<<"$BMX_PI4_MACHINE_LIST"
+if [ "${#BUILD_MACHINES[@]}" -gt 0 ]; then
+  for machine in "${BUILD_MACHINES[@]}"; do
+    grep -Fx "$machine" <<<"$BMX_PI4_MACHINE_LIST" >/dev/null || {
+      echo "unsupported Pi 4 machine: $machine" >&2
+      exit 1
+    }
+  done
+  BMX_PI4_MACHINES=("${BUILD_MACHINES[@]}")
+fi
 build_vice310_machines "${BMX_PI4_MACHINES[@]}"
 if [ "$BUILD_ONLY" -eq 0 ]; then
   "$SRC_DIR/tools/pi4/stage_pi4_sd.sh" "${STAGE_ARGS[@]}"

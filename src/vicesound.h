@@ -44,9 +44,12 @@ public:
   static SoundOutputPriority DefaultOutputPriority(void);
   static unsigned SelectSampleRate(void);
   static boolean USBOutputAvailable(void);
+  static boolean GetUSBOutputProduct(char *buffer, unsigned buffer_size);
 
   boolean Playback(int volume, int channels, SoundOutputPriority priority);
   boolean PlaybackActive(void) const;
+  boolean HDMIOutputSelected(void) const;
+  boolean USBOutputSelected(void) const;
   void USBPlugAndPlayChanged(boolean usbOutputAvailable,
                              SoundOutputPriority priority);
   void CancelPlayback(void);

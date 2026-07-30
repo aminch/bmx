@@ -73,6 +73,9 @@ struct menu_item {
   // Menu item is visible but disabled.
   int disabled;
 
+  // Menu item and its children are omitted from layout and navigation.
+  int hidden;
+
   // Client sub-identifier
   int sub_id;
 
@@ -173,6 +176,8 @@ struct menu_item *ui_menu_add_button_with_value(int id,
                                                 const char *name, int int_value,
                                                 const char *str_value,
                                                 const char *displayed_value);
+void ui_menu_set_button_value_fitted(struct menu_item *item,
+                                     const char *value, int indent);
 struct menu_item *ui_menu_add_range(int id, struct menu_item *folder,
                                     char *name, int min, int max, int step,
                                     int initial_value);

@@ -118,11 +118,16 @@ fileio_info_t *cbmfile_open(const char *file_name, const char *path,
         rname = fsname;
     }
 
-    rawfile = rawfile_open(rname, path, command & FILEIO_COMMAND_MASK);
+    if ((command & FILEIO_COMMAND_MASK) == FILEIO_COMMAND_DIRECTORY) {
+        rawfile = NULL;
+    } else {
+        rawfile = rawfile_open(rname, path, command & FILEIO_COMMAND_MASK);
+    }
 
     lib_free(rname);
 
-    if (rawfile == NULL) {
+    if (rawfile == NULL &&
+            (command & FILEIO_COMMAND_MASK) != FILEIO_COMMAND_DIRECTORY) {
         return NULL;
     }
 
